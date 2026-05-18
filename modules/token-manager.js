@@ -1,6 +1,5 @@
 // modules/token-manager.js
 // Gerencia rotacao automatica de access_token Bling AMBTotal NF-Shopee
-// Padrao identico aos outros servicos Render do Diego
 
 const fetch = require('node-fetch');
 const fs = require('fs');
@@ -8,7 +7,6 @@ const path = require('path');
 
 const TOKEN_FILE = path.join(__dirname, '..', 'data', 'tokens-bling.json');
 
-// Garante que pasta data existe
 function ensureDataDir() {
   const dir = path.dirname(TOKEN_FILE);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
@@ -17,7 +15,6 @@ function ensureDataDir() {
 function loadTokens() {
   ensureDataDir();
   if (!fs.existsSync(TOKEN_FILE)) {
-    // Primeira execucao: usa tokens das env vars
     const initial = {
       access_token: process.env.BLING_ACCESS_TOKEN || '',
       refresh_token: process.env.BLING_REFRESH_TOKEN || '',
@@ -40,7 +37,7 @@ async function refreshBlingToken() {
   const clientSecret = process.env.BLING_CLIENT_SECRET;
 
   if (!tokens.refresh_token) {
-    throw new Error('BLING refresh_token ausente. Faca OAuth inicial e POST em /setup com {code}');
+    throw new Error('BLING refresh_token ausente. Faca OAuth inicial via /setup-bling com {code}');
   }
 
   const credentials = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
@@ -50,13 +47,13 @@ async function refreshBlingToken() {
     headers: {
       'Authorization': `Basic ${credentials}`,
       'Content-Type': 'application/x-www-form-urlencoded',
-      'Accept': '1.0'
+      'Accept': '1.0',
+      'enable-jwt': '1'
     },
     body: `grant_type=refresh_token&refresh_token=${tokens.refresh_token}`
   });
 
   const data = await response.json();
-
   if (!response.ok || !data.access_token) {
     throw new Error(`Refresh Bling falhou: ${JSON.stringify(data)}`);
   }
@@ -64,11 +61,11 @@ async function refreshBlingToken() {
   const newTokens = {
     access_token: data.access_token,
     refresh_token: data.refresh_token,
-    expires_at: Date.now() + (data.expires_in * 1000) - 60000 // -1min safety
+    expires_at: Date.now() + (data.expires_in * 1000) - 60000
   };
 
   saveTokens(newTokens);
-  console.log('[token-manager] Bling token renovado com sucesso');
+  console.log('[token-manager] Bling token renovado');
   return newTokens;
 }
 
@@ -80,7 +77,6 @@ async function getValidBlingToken() {
   return tokens.access_token;
 }
 
-// Endpoint manual: setup inicial com auth_code
 async function setupBlingWithCode(authCode) {
   const clientId = process.env.BLING_CLIENT_ID;
   const clientSecret = process.env.BLING_CLIENT_SECRET;
@@ -91,13 +87,13 @@ async function setupBlingWithCode(authCode) {
     headers: {
       'Authorization': `Basic ${credentials}`,
       'Content-Type': 'application/x-www-form-urlencoded',
-      'Accept': '1.0'
+      'Accept': '1.0',
+      'enable-jwt': '1'
     },
     body: `grant_type=authorization_code&code=${authCode}`
   });
 
   const data = await response.json();
-
   if (!response.ok || !data.access_token) {
     throw new Error(`Setup Bling falhou: ${JSON.stringify(data)}`);
   }
