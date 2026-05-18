@@ -1,0 +1,19 @@
+{
+  "name": "ambtotal-shopee-nf-sync",
+  "version": "1.0.0",
+  "description": "Automacao AMBTotal: detecta pedidos Shopee sem NF, busca NF autorizada no Bling, envia XML pra Shopee e dispara Organizar Envio",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "node-fetch": "^2.7.0",
+    "node-cron": "^3.0.3",
+    "@supabase/supabase-js": "^2.39.0",
+    "dotenv": "^16.3.1"
+  }
+}
