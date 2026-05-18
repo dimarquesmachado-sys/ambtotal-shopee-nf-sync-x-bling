@@ -7,7 +7,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 
-const SHOPEE_BASE = process.env.SHOPEE_BASE_URL || 'https://partner.shopeemobile.com';
+const SHOPEE_BASE = process.env.AMB_SHOPEE_BASE_URL || 'https://partner.shopeemobile.com';
 const TOKEN_FILE = path.join(__dirname, '..', 'data', 'tokens-shopee.json');
 
 // =============================================================================
@@ -40,8 +40,8 @@ function saveShopeeTokens(tokens) {
 }
 
 function generateSign(apiPath, timestamp, accessToken = null, shopId = null) {
-  const partnerId = process.env.SHOPEE_PARTNER_ID;
-  const partnerKey = process.env.SHOPEE_PARTNER_KEY;
+  const partnerId = process.env.AMB_SHOPEE_PARTNER_ID;
+  const partnerKey = process.env.AMB_SHOPEE_PARTNER_KEY;
 
   let baseString = `${partnerId}${apiPath}${timestamp}`;
   if (accessToken && shopId) {
@@ -59,7 +59,7 @@ async function refreshShopeeToken() {
 
   const apiPath = '/api/v2/auth/access_token/get';
   const timestamp = Math.floor(Date.now() / 1000);
-  const partnerId = parseInt(process.env.SHOPEE_PARTNER_ID);
+  const partnerId = parseInt(process.env.AMB_SHOPEE_PARTNER_ID);
   const sign = generateSign(apiPath, timestamp);
 
   const url = `${SHOPEE_BASE}${apiPath}?partner_id=${partnerId}&timestamp=${timestamp}&sign=${sign}`;
@@ -105,7 +105,7 @@ async function getValidShopeeToken() {
 async function shopeeApiCall(apiPath, method = 'GET', body = null) {
   const tokens = await getValidShopeeToken();
   const timestamp = Math.floor(Date.now() / 1000);
-  const partnerId = parseInt(process.env.SHOPEE_PARTNER_ID);
+  const partnerId = parseInt(process.env.AMB_SHOPEE_PARTNER_ID);
   const sign = generateSign(apiPath, timestamp, tokens.access_token, tokens.shop_id);
 
   const queryParams = [
@@ -136,7 +136,7 @@ async function listarPedidosToShip(diasAtras = 3) {
   const apiPath = `/api/v2/order/get_order_list`;
   const tokens = await getValidShopeeToken();
   const timestamp = Math.floor(Date.now() / 1000);
-  const partnerId = parseInt(process.env.SHOPEE_PARTNER_ID);
+  const partnerId = parseInt(process.env.AMB_SHOPEE_PARTNER_ID);
   const sign = generateSign(apiPath, timestamp, tokens.access_token, tokens.shop_id);
 
   const queryParams = [
@@ -167,7 +167,7 @@ async function buscarDetalhesPedidos(orderSnList) {
   const apiPath = `/api/v2/order/get_order_detail`;
   const tokens = await getValidShopeeToken();
   const timestamp = Math.floor(Date.now() / 1000);
-  const partnerId = parseInt(process.env.SHOPEE_PARTNER_ID);
+  const partnerId = parseInt(process.env.AMB_SHOPEE_PARTNER_ID);
   const sign = generateSign(apiPath, timestamp, tokens.access_token, tokens.shop_id);
 
   const queryParams = [
@@ -222,7 +222,7 @@ async function getShippingParameter(orderSn) {
   const apiPath = `/api/v2/logistics/get_shipping_parameter`;
   const tokens = await getValidShopeeToken();
   const timestamp = Math.floor(Date.now() / 1000);
-  const partnerId = parseInt(process.env.SHOPEE_PARTNER_ID);
+  const partnerId = parseInt(process.env.AMB_SHOPEE_PARTNER_ID);
   const sign = generateSign(apiPath, timestamp, tokens.access_token, tokens.shop_id);
 
   const queryParams = [
