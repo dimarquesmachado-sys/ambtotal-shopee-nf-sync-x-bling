@@ -16,7 +16,7 @@ const app = express();
 app.use(express.json({ limit: '5mb' }));
 
 const PORT = process.env.PORT || 3000;
-const SHOPEE_BASE = process.env.SHOPEE_BASE_URL || 'https://partner.shopeemobile.com';
+const SHOPEE_BASE = process.env.AMB_SHOPEE_BASE_URL || 'https://partner.shopeemobile.com';
 
 // =============================================================================
 // ROTAS INFORMATIVAS
@@ -91,8 +91,8 @@ app.post('/setup-bling', async (req, res) => {
 async function exchangeShopeeCode(code, shopId) {
   const crypto = require('crypto');
   const fetch = require('node-fetch');
-  const partnerId = parseInt(process.env.SHOPEE_PARTNER_ID);
-  const partnerKey = process.env.SHOPEE_PARTNER_KEY;
+  const partnerId = parseInt(process.env.AMB_SHOPEE_PARTNER_ID);
+  const partnerKey = process.env.AMB_SHOPEE_PARTNER_KEY;
   const apiPath = '/api/v2/auth/token/get';
   const timestamp = Math.floor(Date.now() / 1000);
   const sign = crypto.createHmac('sha256', partnerKey)
@@ -207,5 +207,5 @@ console.log(`[cron] Agendado: ${CRON_EXPR} (America/Sao_Paulo)`);
 
 app.listen(PORT, () => {
   console.log(`[server] Rodando na porta ${PORT}`);
-  console.log(`[server] SHOPEE_BASE_URL: ${SHOPEE_BASE}`);
+  console.log(`[server] AMB_SHOPEE_BASE_URL: ${SHOPEE_BASE}`);
 });
