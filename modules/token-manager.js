@@ -33,11 +33,11 @@ function saveTokens(tokens) {
 
 async function refreshBlingToken() {
   const tokens = loadTokens();
-  const clientId = process.env.BLING_CLIENT_ID;
-  const clientSecret = process.env.BLING_CLIENT_SECRET;
+  const clientId = process.env.AMB_BLING_CLIENT_ID;
+  const clientSecret = process.env.AMB_BLING_CLIENT_SECRET;
 
   if (!tokens.refresh_token) {
-    throw new Error('BLING refresh_token ausente. Faca OAuth inicial via /setup-bling com {code}');
+    throw new Error('AMB_BLING refresh_token ausente. Faca OAuth inicial via /setup-bling com {code}');
   }
 
   const credentials = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
@@ -78,8 +78,8 @@ async function getValidBlingToken() {
 }
 
 async function setupBlingWithCode(authCode) {
-  const clientId = process.env.BLING_CLIENT_ID;
-  const clientSecret = process.env.BLING_CLIENT_SECRET;
+  const clientId = process.env.AMB_BLING_CLIENT_ID;
+  const clientSecret = process.env.AMB_BLING_CLIENT_SECRET;
   const credentials = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
 
   const response = await fetch('https://api.bling.com.br/Api/v3/oauth/token', {
