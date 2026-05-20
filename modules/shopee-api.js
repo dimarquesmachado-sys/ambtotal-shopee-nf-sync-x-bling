@@ -233,7 +233,7 @@ async function uploadInvoice(orderSn, xmlBase64, chaveAcesso, numeroNf) {
     contentType: 'application/xml'
   });
 
-  const url = `${SHOPEE_BASE_BR}${apiPath}?${queryParams}`;
+  const url = `${SHOPEE_BASE}${apiPath}?${queryParams}`;
   const response = await fetch(url, {
     method: 'POST',
     headers: form.getHeaders(),
