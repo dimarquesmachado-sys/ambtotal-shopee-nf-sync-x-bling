@@ -96,6 +96,12 @@ async function baixarXmlAutorizado(nfeId) {
     throw new Error(`NF ${nfeId} autorizada mas sem campo xml. Resposta: ${JSON.stringify(nf).slice(0, 500)}`);
   }
 
+  // ---- LOG DIAGNOSTICO ----
+  console.log(`[baixarXmlAutorizado] nfeId=${nfeId} chave=${nf.chaveAcesso} numero=${nf.numero}`);
+  console.log(`[baixarXmlAutorizado] campo xml (primeiros 80 chars): ${String(nf.xml).slice(0, 80)}`);
+  console.log(`[baixarXmlAutorizado] tamanho campo xml: ${String(nf.xml).length}`);
+  // --------------------------
+
   return {
     chave: nf.chaveAcesso,
     numero: nf.numero,
