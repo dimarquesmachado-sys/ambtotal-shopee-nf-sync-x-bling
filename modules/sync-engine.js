@@ -29,7 +29,7 @@ async function ciclo({ dryRun = false } = {}) {
 
   let listaPedidos;
   try {
-    listaPedidos = await shopee.listarPedidosToShip(3);
+    listaPedidos = await shopee.listarPedidosPendentesNf(7);
   } catch (e) {
     console.error('[sync-engine] Erro listando pedidos Shopee:', e.message);
     resultado.erro_geral = e.message;
@@ -37,25 +37,15 @@ async function ciclo({ dryRun = false } = {}) {
   }
 
   if (listaPedidos.length === 0) {
-    console.log('[sync-engine] Nenhum pedido to_ship encontrado');
+    console.log('[sync-engine] Nenhum pedido INVOICE_PENDING encontrado');
     return resultado;
   }
 
-  const orderSns = listaPedidos.map(p => p.order_sn);
-  const detalhes = [];
-  for (let i = 0; i < orderSns.length; i += 50) {
-    const lote = orderSns.slice(i, i + 50);
-    try {
-      const det = await shopee.buscarDetalhesPedidos(lote);
-      detalhes.push(...det);
-    } catch (e) {
-      console.error('[sync-engine] Erro detalhes Shopee lote:', e.message);
-    }
-  }
-
-  const pendentes = detalhes.filter(pedidoEstaPendenteDeNf);
+  // Pedidos com status INVOICE_PENDING ja sao, por definicao da Shopee, os que
+  // precisam de NF-e. Nao precisa filtrar de novo pelo invoice_data.
+  const pendentes = listaPedidos;
   resultado.detectados = pendentes.length;
-  console.log(`[sync-engine] Detectados ${pendentes.length} pedido(s) pendente(s) de NF`);
+  console.log(`[sync-engine] Detectados ${pendentes.length} pedido(s) pendente(s) de NF (INVOICE_PENDING)`);
 
   if (dryRun) {
     resultado.detalhes = pendentes.map(p => ({ order_sn: p.order_sn, status: 'dry_run' }));
