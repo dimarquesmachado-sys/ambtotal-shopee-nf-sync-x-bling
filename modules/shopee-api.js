@@ -225,6 +225,14 @@ async function uploadInvoice(orderSn, xmlBase64, chaveAcesso, numeroNf) {
     throw new Error(`XML da NF excede 1MB (${xmlBuffer.length} bytes) - limite Shopee`);
   }
 
+  // ---- LOGS DE DIAGNOSTICO ----
+  const xmlInicio = xmlBuffer.toString('utf8', 0, 120);
+  console.log(`[uploadInvoice] order_sn=${orderSn} chave=${chaveAcesso} numero=${numeroNf}`);
+  console.log(`[uploadInvoice] XML bytes=${xmlBuffer.length}`);
+  console.log(`[uploadInvoice] XML inicio: ${xmlInicio}`);
+  console.log(`[uploadInvoice] tem header xml? ${xmlInicio.includes('<?xml')}`);
+  // ------------------------------
+
   const form = new FormData();
   form.append('order_sn', orderSn);
   form.append('file_type', '4'); // 4 = xml
@@ -241,6 +249,7 @@ async function uploadInvoice(orderSn, xmlBase64, chaveAcesso, numeroNf) {
   });
 
   const data = await response.json();
+  console.log(`[uploadInvoice] resposta Shopee: HTTP ${response.status} | ${JSON.stringify(data)}`);
   if (data.error) throw new Error(`Shopee uploadInvoice erro: ${JSON.stringify(data)}`);
   return data;
 }
