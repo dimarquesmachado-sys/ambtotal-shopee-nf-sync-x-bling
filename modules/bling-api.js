@@ -6,7 +6,23 @@ const { getValidBlingToken, refreshBlingToken } = require('./token-manager');
 
 const BLING_BASE = 'https://api.bling.com.br/Api/v3';
 
-async function blingFetch(loja, url, options = {}) {
+// Throttle: o Bling permite no maximo 3 req/seg. Garantimos um intervalo
+// minimo entre chamadas (fila simples) pra nunca estourar o limite.
+const MIN_INTERVALO_MS = 400; // ~2.5 req/seg, com folga
+let ultimaChamada = 0;
+
+async function aguardarThrottle() {
+  const agora = Date.now();
+  const desde = agora - ultimaChamada;
+  if (desde < MIN_INTERVALO_MS) {
+    await new Promise(r => setTimeout(r, MIN_INTERVALO_MS - desde));
+  }
+  ultimaChamada = Date.now();
+}
+
+async function blingFetch(loja, url, options = {}, tentativa = 1) {
+  await aguardarThrottle();
+
   let token = await getValidBlingToken(loja);
   let response = await fetch(url, {
     ...options,
@@ -21,6 +37,7 @@ async function blingFetch(loja, url, options = {}) {
   if (response.status === 401) {
     console.log(`[bling-api][${loja.key}] 401 recebido, forcando refresh token`);
     const newTokens = await refreshBlingToken(loja);
+    await aguardarThrottle();
     response = await fetch(url, {
       ...options,
       headers: {
@@ -30,6 +47,13 @@ async function blingFetch(loja, url, options = {}) {
         'enable-jwt': '1'
       }
     });
+  }
+
+  // 429 = rate limit. Espera 1.2s e tenta de novo (ate 3 vezes).
+  if (response.status === 429 && tentativa <= 3) {
+    console.log(`[bling-api][${loja.key}] 429 rate limit, tentativa ${tentativa}, aguardando 1.2s`);
+    await new Promise(r => setTimeout(r, 1200));
+    return blingFetch(loja, url, options, tentativa + 1);
   }
 
   return response;
