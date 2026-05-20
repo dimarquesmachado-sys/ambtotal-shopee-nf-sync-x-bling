@@ -202,7 +202,7 @@ async function buscarDetalhesPedidos(orderSnList) {
  * O arquivo vai como multipart/form-data (binario), limite 1MB.
  * A assinatura/auth vai na query string (igual aos outros endpoints).
  */
-async function uploadInvoice(orderSn, xmlBase64, chaveAcesso, numeroNf) {
+async function uploadInvoice(orderSn, xmlConteudo, chaveAcesso, numeroNf) {
   const FormData = require('form-data');
   const apiPath = `/api/v2/order/upload_invoice_doc`;
 
@@ -219,8 +219,8 @@ async function uploadInvoice(orderSn, xmlBase64, chaveAcesso, numeroNf) {
     `sign=${sign}`
   ].join('&');
 
-  // XML vem em base64 do Bling -> converte pra buffer binario
-  const xmlBuffer = Buffer.from(xmlBase64, 'base64');
+  // XML chega como string de texto -> converte pra buffer UTF-8
+  const xmlBuffer = Buffer.from(xmlConteudo, 'utf8');
   if (xmlBuffer.length > 1024 * 1024) {
     throw new Error(`XML da NF excede 1MB (${xmlBuffer.length} bytes) - limite Shopee`);
   }
