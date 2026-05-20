@@ -55,6 +55,24 @@ app.get('/', (req, res) => {
 
 app.get('/health', (req, res) => res.json({ ok: true, ts: new Date().toISOString() }));
 
+// DEBUG TEMPORARIO: mostra quais env vars o sistema esta lendo (sem expor valores).
+app.get('/debug-env', (req, res) => {
+  const prefixos = ['AMB_SYNC', 'GIRASSOL_SYNC', 'GOOD_SYNC'];
+  const sufixos = ['_BLING_CLIENT_ID', '_BLING_CLIENT_SECRET', '_SHOPEE_PARTNER_ID', '_SHOPEE_PARTNER_KEY'];
+  const out = {};
+  for (const p of prefixos) {
+    out[p] = {};
+    for (const s of sufixos) {
+      const nome = p + s;
+      const val = process.env[nome];
+      out[p][s] = val ? `OK (len=${val.length})` : 'AUSENTE/VAZIO';
+    }
+  }
+  // Lista todas as chaves de env que contem SYNC, pra pegar nomes com erro de digitacao
+  const todasSync = Object.keys(process.env).filter(k => k.includes('SYNC')).sort();
+  res.json({ esperadas: out, todas_env_com_SYNC: todasSync });
+});
+
 // Status agregado de todas as lojas
 app.get('/status', async (req, res) => {
   try {
