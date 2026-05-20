@@ -132,7 +132,12 @@ async function shopeeApiCall(apiPath, method = 'GET', body = null) {
 // ORDER LISTING
 // =============================================================================
 
-async function listarPedidosToShip(diasAtras = 3) {
+/**
+ * Lista pedidos que estao aguardando NF-e (status INVOICE_PENDING).
+ * Pela doc Shopee BR: esse status retorna exatamente os pedidos que precisam
+ * ter a NF-e adicionada antes de organizar o envio.
+ */
+async function listarPedidosPendentesNf(diasAtras = 7) {
   const agora = Math.floor(Date.now() / 1000);
   const inicio = agora - (diasAtras * 24 * 60 * 60);
 
@@ -152,7 +157,7 @@ async function listarPedidosToShip(diasAtras = 3) {
     `time_from=${inicio}`,
     `time_to=${agora}`,
     `page_size=100`,
-    `order_status=READY_TO_SHIP`
+    `order_status=INVOICE_PENDING`
   ].join('&');
 
   const url = `${SHOPEE_BASE}${apiPath}?${queryParams}`;
@@ -311,7 +316,7 @@ module.exports = {
   loadShopeeTokens,
   saveShopeeTokens,
   generateSign,
-  listarPedidosToShip,
+  listarPedidosPendentesNf,
   buscarDetalhesPedidos,
   uploadInvoice,
   getShippingParameter,
