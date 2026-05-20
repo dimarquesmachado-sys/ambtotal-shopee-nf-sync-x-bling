@@ -8,7 +8,8 @@ const fs = require('fs');
 const path = require('path');
 
 const SHOPEE_BASE = process.env.AMB_SHOPEE_BASE_URL || 'https://partner.shopeemobile.com';
-const TOKEN_FILE = path.join(__dirname, '..', 'data', 'tokens-shopee.json');
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '..', 'data');
+const TOKEN_FILE = path.join(DATA_DIR, 'tokens-shopee.json');
 
 // =============================================================================
 // TOKEN MANAGEMENT
