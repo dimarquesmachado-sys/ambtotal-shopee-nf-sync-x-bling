@@ -143,6 +143,28 @@ app.post('/:loja/setup-shopee', resolverLoja, async (req, res) => {
   }
 });
 
+// Gera o link de autorizacao Shopee (com sign) e redireciona o usuario pra la.
+// Basta acessar /amb/autorizar-shopee no navegador.
+app.get('/:loja/autorizar-shopee', resolverLoja, (req, res) => {
+  try {
+    const loja = req.loja;
+    const partnerId = parseInt(loja.shopee.partnerId);
+    const partnerKey = loja.shopee.partnerKey;
+    const apiPath = '/api/v2/shop/auth_partner';
+    const timestamp = Math.floor(Date.now() / 1000);
+    const sign = crypto.createHmac('sha256', partnerKey)
+      .update(`${partnerId}${apiPath}${timestamp}`).digest('hex');
+
+    const host = `${req.protocol}://${req.get('host')}`;
+    const redirect = `${host}/${loja.key}/oauth/callback-shopee`;
+
+    const authUrl = `${SHOPEE_BASE}${apiPath}?partner_id=${partnerId}&timestamp=${timestamp}&sign=${sign}&redirect=${encodeURIComponent(redirect)}`;
+    res.redirect(authUrl);
+  } catch (e) {
+    res.status(500).send(`<h2>Erro ao gerar link</h2><pre>${e.message}</pre>`);
+  }
+});
+
 app.get('/:loja/oauth/callback-shopee', resolverLoja, async (req, res) => {
   try {
     const { code, shop_id } = req.query;
