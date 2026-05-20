@@ -1,152 +1,128 @@
 // modules/sync-engine.js
-// Motor de sincronizacao: detecta pedidos sem NF e sincroniza
+// Motor de sincronizacao multi-loja: detecta pedidos sem NF e sincroniza.
+// Processa cada loja com suas proprias credenciais.
 
 const shopee = require('./shopee-api');
 const bling = require('./bling-api');
 const log = require('./supabase-log');
+const { lojasConfiguradas, getConfigLoja } = require('./lojas');
 
-function pedidoEstaPendenteDeNf(orderDetail) {
-  if (!orderDetail) return false;
-  if (!orderDetail.invoice_data) return true;
+// Processa o fluxo completo de UM pedido pra uma loja.
+async function processarPedido(loja, orderSn) {
+  const pedidoBling = await bling.buscarPedidoPorNumeroLoja(loja, orderSn);
+  if (!pedidoBling) {
+    return { order_sn: orderSn, loja: loja.key, status: 'pedido_bling_nao_encontrado' };
+  }
 
-  const inv = orderDetail.invoice_data;
-  if (!inv.access_key && !inv.number) return true;
+  const nfeId = await bling.buscarNfPorPedido(loja, pedidoBling.id);
+  if (!nfeId) {
+    return { order_sn: orderSn, loja: loja.key, pedido_bling_id: pedidoBling.id, status: 'sem_nf_bling' };
+  }
 
-  return false;
+  const nfData = await bling.baixarXmlAutorizado(loja, nfeId);
+
+  await shopee.uploadInvoice(loja, orderSn, nfData.xmlConteudo, nfData.chave, nfData.numero);
+  await log.logSync({
+    order_sn: orderSn, loja: loja.key, pedido_bling_id: pedidoBling.id, nfe_id: nfeId,
+    chave_acesso: nfData.chave, status: 'sucesso', etapa: 'upload_invoice'
+  });
+
+  // Aguarda processar e dispara organizar envio
+  await new Promise(r => setTimeout(r, 30000));
+  await shopee.shipOrder(loja, orderSn);
+  await log.logSync({
+    order_sn: orderSn, loja: loja.key, pedido_bling_id: pedidoBling.id, nfe_id: nfeId,
+    chave_acesso: nfData.chave, status: 'sucesso', etapa: 'ship_order'
+  });
+
+  return { order_sn: orderSn, loja: loja.key, pedido_bling_id: pedidoBling.id, nfe_id: nfeId, chave: nfData.chave, status: 'sucesso' };
 }
 
-async function ciclo({ dryRun = false } = {}) {
+// Ciclo de UMA loja.
+async function cicloLoja(loja, { dryRun = false } = {}) {
   const resultado = {
-    inicio: new Date().toISOString(),
-    detectados: 0,
-    processados: 0,
-    sucessos: 0,
-    erros: 0,
-    detalhes: []
+    loja: loja.key,
+    detectados: 0, processados: 0, sucessos: 0, erros: 0, detalhes: []
   };
 
-  console.log('[sync-engine] === Iniciando ciclo ===');
+  console.log(`[sync-engine][${loja.key}] === Iniciando ciclo ===`);
 
   let listaPedidos;
   try {
-    listaPedidos = await shopee.listarPedidosPendentesNf(7);
+    listaPedidos = await shopee.listarPedidosPendentesNf(loja, 7);
   } catch (e) {
-    console.error('[sync-engine] Erro listando pedidos Shopee:', e.message);
+    console.error(`[sync-engine][${loja.key}] Erro listando Shopee:`, e.message);
     resultado.erro_geral = e.message;
     return resultado;
   }
 
   if (listaPedidos.length === 0) {
-    console.log('[sync-engine] Nenhum pedido INVOICE_PENDING encontrado');
+    console.log(`[sync-engine][${loja.key}] Nenhum pedido INVOICE_PENDING`);
     return resultado;
   }
 
-  // Pedidos com status INVOICE_PENDING ja sao, por definicao da Shopee, os que
-  // precisam de NF-e. Nao precisa filtrar de novo pelo invoice_data.
-  const pendentes = listaPedidos;
-  resultado.detectados = pendentes.length;
-  console.log(`[sync-engine] Detectados ${pendentes.length} pedido(s) pendente(s) de NF (INVOICE_PENDING)`);
+  resultado.detectados = listaPedidos.length;
+  console.log(`[sync-engine][${loja.key}] Detectados ${listaPedidos.length} pendente(s) de NF`);
 
   if (dryRun) {
-    resultado.detalhes = pendentes.map(p => ({ order_sn: p.order_sn, status: 'dry_run' }));
+    resultado.detalhes = listaPedidos.map(p => ({ order_sn: p.order_sn, status: 'dry_run' }));
     return resultado;
   }
 
-  for (const ped of pendentes) {
+  for (const ped of listaPedidos) {
     const orderSn = ped.order_sn;
-    const item = { order_sn: orderSn };
     resultado.processados++;
-
     try {
       if (await log.jaSincronizado(orderSn, 6)) {
-        item.status = 'ja_sincronizado_recente';
-        resultado.detalhes.push(item);
+        resultado.detalhes.push({ order_sn: orderSn, status: 'ja_sincronizado_recente' });
         continue;
       }
-
-      const pedidoBling = await bling.buscarPedidoPorNumeroLoja(orderSn);
-      if (!pedidoBling) {
-        item.status = 'pedido_bling_nao_encontrado';
-        await log.logSync({ order_sn: orderSn, status: 'erro', etapa: 'detect', erro: 'pedido nao achado no Bling' });
-        resultado.detalhes.push(item);
-        continue;
+      const r = await processarPedido(loja, orderSn);
+      if (r.status === 'sucesso') {
+        resultado.sucessos++;
+      } else {
+        await log.logSync({ order_sn: orderSn, loja: loja.key, status: r.status, etapa: 'detect', erro: r.status });
       }
-      item.pedido_bling_id = pedidoBling.id;
-
-      const nfeId = await bling.buscarNfPorPedido(pedidoBling.id);
-      if (!nfeId) {
-        item.status = 'sem_nf_bling';
-        await log.logSync({ order_sn: orderSn, pedido_bling_id: pedidoBling.id, status: 'sem_nf_bling', etapa: 'detect', erro: 'sem NF vinculada' });
-        resultado.detalhes.push(item);
-        continue;
-      }
-      item.nfe_id = nfeId;
-
-      const nfData = await bling.baixarXmlAutorizado(nfeId);
-      item.chave = nfData.chave;
-
-      await shopee.uploadInvoice(orderSn, nfData.xmlConteudo, nfData.chave, nfData.numero);
-      await log.logSync({
-        order_sn: orderSn, pedido_bling_id: pedidoBling.id, nfe_id: nfeId,
-        chave_acesso: nfData.chave, status: 'sucesso', etapa: 'upload_invoice'
-      });
-
-      await new Promise(r => setTimeout(r, 30000));
-      await shopee.shipOrder(orderSn);
-
-      await log.logSync({
-        order_sn: orderSn, pedido_bling_id: pedidoBling.id, nfe_id: nfeId,
-        chave_acesso: nfData.chave, status: 'sucesso', etapa: 'ship_order'
-      });
-
-      item.status = 'sucesso';
-      resultado.sucessos++;
-
+      resultado.detalhes.push(r);
     } catch (e) {
-      console.error(`[sync-engine] Erro processando ${orderSn}:`, e.message);
-      item.status = 'erro';
-      item.erro = e.message;
+      console.error(`[sync-engine][${loja.key}] Erro processando ${orderSn}:`, e.message);
       resultado.erros++;
-      await log.logSync({ order_sn: orderSn, status: 'erro', etapa: item.nfe_id ? 'upload_invoice' : 'detect', erro: e.message });
+      resultado.detalhes.push({ order_sn: orderSn, status: 'erro', erro: e.message });
+      await log.logSync({ order_sn: orderSn, loja: loja.key, status: 'erro', etapa: 'sync', erro: e.message });
     }
-
-    resultado.detalhes.push(item);
     await new Promise(r => setTimeout(r, 2000));
   }
 
-  resultado.fim = new Date().toISOString();
-  console.log(`[sync-engine] === Fim do ciclo: ${resultado.sucessos} sucesso, ${resultado.erros} erros ===`);
+  console.log(`[sync-engine][${loja.key}] === Fim: ${resultado.sucessos} sucesso, ${resultado.erros} erros ===`);
   return resultado;
 }
 
-async function sincronizarPedido(orderSn) {
-  console.log(`[sync-engine] Sincronizando pedido especifico: ${orderSn}`);
+// Ciclo de TODAS as lojas configuradas (usado pelo cron).
+async function cicloTodasLojas({ dryRun = false } = {}) {
+  const lojas = lojasConfiguradas();
+  const resultado = { inicio: new Date().toISOString(), lojas: {} };
 
-  const detalhes = await shopee.buscarDetalhesPedidos([orderSn]);
-  if (detalhes.length === 0) throw new Error('Pedido nao encontrado na Shopee');
+  for (const loja of lojas) {
+    resultado.lojas[loja.key] = await cicloLoja(loja, { dryRun });
+  }
 
-  const pedidoBling = await bling.buscarPedidoPorNumeroLoja(orderSn);
-  if (!pedidoBling) throw new Error('Pedido nao encontrado no Bling');
-
-  const nfeId = await bling.buscarNfPorPedido(pedidoBling.id);
-  if (!nfeId) throw new Error('Pedido Bling sem NF vinculada');
-
-  const nfData = await bling.baixarXmlAutorizado(nfeId);
-
-  await shopee.uploadInvoice(orderSn, nfData.xmlConteudo, nfData.chave, nfData.numero);
-  await new Promise(r => setTimeout(r, 30000));
-  await shopee.shipOrder(orderSn);
-
-  await log.logSync({
-    order_sn: orderSn,
-    pedido_bling_id: pedidoBling.id,
-    nfe_id: nfeId,
-    chave_acesso: nfData.chave,
-    status: 'sucesso',
-    etapa: 'manual_sync'
-  });
-
-  return { order_sn: orderSn, chave: nfData.chave, numero: nfData.numero, status: 'sucesso' };
+  resultado.fim = new Date().toISOString();
+  return resultado;
 }
 
-module.exports = { ciclo, sincronizarPedido, pedidoEstaPendenteDeNf };
+// Sincroniza UM pedido especifico de UMA loja (pra testes manuais).
+async function sincronizarPedido(lojaKey, orderSn) {
+  const loja = getConfigLoja(lojaKey);
+  console.log(`[sync-engine][${loja.key}] Sincronizando pedido especifico: ${orderSn}`);
+  const r = await processarPedido(loja, orderSn);
+  if (r.status !== 'sucesso') {
+    throw new Error(`Falha ao sincronizar ${orderSn}: ${r.status}`);
+  }
+  await log.logSync({
+    order_sn: orderSn, loja: loja.key, pedido_bling_id: r.pedido_bling_id,
+    nfe_id: r.nfe_id, chave_acesso: r.chave, status: 'sucesso', etapa: 'manual_sync'
+  });
+  return r;
+}
+
+module.exports = { cicloLoja, cicloTodasLojas, sincronizarPedido, processarPedido };

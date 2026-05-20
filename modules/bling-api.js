@@ -1,13 +1,13 @@
 // modules/bling-api.js
-// Interface com Bling AMBTotal: busca pedido por numeroLoja e baixa XML autorizado
+// Interface com Bling, por loja. Cada funcao recebe o objeto "loja" (config de lojas.js).
 
 const fetch = require('node-fetch');
-const { getValidBlingToken } = require('./token-manager');
+const { getValidBlingToken, refreshBlingToken } = require('./token-manager');
 
 const BLING_BASE = 'https://api.bling.com.br/Api/v3';
 
-async function blingFetch(url, options = {}) {
-  let token = await getValidBlingToken();
+async function blingFetch(loja, url, options = {}) {
+  let token = await getValidBlingToken(loja);
   let response = await fetch(url, {
     ...options,
     headers: {
@@ -19,9 +19,8 @@ async function blingFetch(url, options = {}) {
   });
 
   if (response.status === 401) {
-    console.log('[bling-api] 401 recebido, forcando refresh token');
-    const { refreshBlingToken } = require('./token-manager');
-    const newTokens = await refreshBlingToken();
+    console.log(`[bling-api][${loja.key}] 401 recebido, forcando refresh token`);
+    const newTokens = await refreshBlingToken(loja);
     response = await fetch(url, {
       ...options,
       headers: {
@@ -36,13 +35,13 @@ async function blingFetch(url, options = {}) {
   return response;
 }
 
-async function buscarPedidoPorNumeroLoja(orderSn) {
+async function buscarPedidoPorNumeroLoja(loja, orderSn) {
   const url = `${BLING_BASE}/pedidos/vendas?numeroLoja=${encodeURIComponent(orderSn)}&limite=10`;
-  const response = await blingFetch(url);
+  const response = await blingFetch(loja, url);
   const data = await response.json();
 
   if (!response.ok) {
-    throw new Error(`Bling buscarPedidoPorNumeroLoja erro: ${JSON.stringify(data)}`);
+    throw new Error(`[${loja.key}] Bling buscarPedidoPorNumeroLoja erro: ${JSON.stringify(data)}`);
   }
 
   const pedidos = data.data || [];
@@ -50,74 +49,71 @@ async function buscarPedidoPorNumeroLoja(orderSn) {
   return pedidos[0];
 }
 
-async function buscarPedidoDetalhes(pedidoId) {
+async function buscarPedidoDetalhes(loja, pedidoId) {
   const url = `${BLING_BASE}/pedidos/vendas/${pedidoId}`;
-  const response = await blingFetch(url);
+  const response = await blingFetch(loja, url);
   const data = await response.json();
 
   if (!response.ok) {
-    throw new Error(`Bling buscarPedidoDetalhes erro: ${JSON.stringify(data)}`);
+    throw new Error(`[${loja.key}] Bling buscarPedidoDetalhes erro: ${JSON.stringify(data)}`);
   }
 
   return data.data;
 }
 
-async function buscarNfPorPedido(pedidoId) {
-  const pedido = await buscarPedidoDetalhes(pedidoId);
+async function buscarNfPorPedido(loja, pedidoId) {
+  const pedido = await buscarPedidoDetalhes(loja, pedidoId);
   if (pedido && pedido.notaFiscal && pedido.notaFiscal.id) {
     return pedido.notaFiscal.id;
   }
   return null;
 }
 
-async function buscarNfPorId(nfeId) {
+async function buscarNfPorId(loja, nfeId) {
   const url = `${BLING_BASE}/nfe/${nfeId}`;
-  const response = await blingFetch(url);
+  const response = await blingFetch(loja, url);
   const data = await response.json();
 
   if (!response.ok) {
-    throw new Error(`Bling buscarNfPorId erro: ${JSON.stringify(data)}`);
+    throw new Error(`[${loja.key}] Bling buscarNfPorId erro: ${JSON.stringify(data)}`);
   }
 
   return data.data;
 }
 
-async function baixarXmlAutorizado(nfeId) {
-  const nf = await buscarNfPorId(nfeId);
+async function baixarXmlAutorizado(loja, nfeId) {
+  const nf = await buscarNfPorId(loja, nfeId);
 
-  if (!nf) throw new Error(`NF ${nfeId} nao encontrada`);
+  if (!nf) throw new Error(`[${loja.key}] NF ${nfeId} nao encontrada`);
 
   const situacao = nf.situacao;
   if (situacao !== 5 && situacao !== 6) {
-    throw new Error(`NF ${nfeId} nao esta autorizada (situacao=${situacao})`);
+    throw new Error(`[${loja.key}] NF ${nfeId} nao esta autorizada (situacao=${situacao})`);
   }
 
   if (!nf.xml) {
-    throw new Error(`NF ${nfeId} autorizada mas sem campo xml. Resposta: ${JSON.stringify(nf).slice(0, 500)}`);
+    throw new Error(`[${loja.key}] NF ${nfeId} autorizada mas sem campo xml. Resposta: ${JSON.stringify(nf).slice(0, 500)}`);
   }
 
   // O Bling retorna no campo "xml" uma URL pra baixar o XML, nao o conteudo.
-  // Detecta se e URL e baixa o conteudo real.
   let xmlConteudo;
   const campoXml = String(nf.xml).trim();
   if (campoXml.startsWith('http://') || campoXml.startsWith('https://')) {
-    console.log(`[baixarXmlAutorizado] campo xml e URL, baixando conteudo: ${campoXml}`);
+    console.log(`[baixarXmlAutorizado][${loja.key}] campo xml e URL, baixando: ${campoXml}`);
     const resp = await fetch(campoXml);
     if (!resp.ok) {
-      throw new Error(`Falha ao baixar XML da URL Bling (HTTP ${resp.status}): ${campoXml}`);
+      throw new Error(`[${loja.key}] Falha ao baixar XML da URL Bling (HTTP ${resp.status})`);
     }
     xmlConteudo = await resp.text();
   } else {
-    // fallback: campo ja contem o XML (texto puro)
     xmlConteudo = campoXml;
   }
 
-  // Garante que e um XML valido (deve comecar com <?xml ou <)
   const inicioXml = xmlConteudo.trimStart().slice(0, 60);
-  console.log(`[baixarXmlAutorizado] XML real (primeiros 60 chars): ${inicioXml}`);
-  console.log(`[baixarXmlAutorizado] tamanho XML real: ${xmlConteudo.length} chars`);
+  console.log(`[baixarXmlAutorizado][${loja.key}] XML inicio: ${inicioXml}`);
+  console.log(`[baixarXmlAutorizado][${loja.key}] tamanho: ${xmlConteudo.length} chars`);
   if (!inicioXml.includes('<?xml') && !inicioXml.includes('<')) {
-    throw new Error(`Conteudo baixado nao parece XML: ${inicioXml}`);
+    throw new Error(`[${loja.key}] Conteudo baixado nao parece XML: ${inicioXml}`);
   }
 
   return {

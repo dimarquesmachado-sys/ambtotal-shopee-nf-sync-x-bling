@@ -1,6 +1,6 @@
 // modules/supabase-log.js
-// Registro de cada tentativa de sincronizacao
-// Tabela esperada no Supabase: shopee_nf_sync (criar SQL no README)
+// Registro de cada tentativa de sync, por loja.
+// Funciona sem Supabase configurado (apenas pula o log).
 
 const { createClient } = require('@supabase/supabase-js');
 
@@ -11,30 +11,25 @@ function getClient() {
   const url = process.env.SUPABASE_URL;
   const key = process.env.SUPABASE_SERVICE_KEY;
   if (!url || !key) {
-    console.warn('[supabase-log] SUPABASE_URL ou SUPABASE_SERVICE_KEY ausentes; log desativado');
     return null;
   }
   supabase = createClient(url, key);
   return supabase;
 }
 
-/**
- * Loga uma tentativa de sync.
- * status: 'pendente' | 'sucesso' | 'erro' | 'ja_enviado' | 'sem_nf_bling'
- */
-async function logSync({ order_sn, pedido_bling_id, nfe_id, chave_acesso, status, erro, etapa }) {
+async function logSync({ order_sn, loja, pedido_bling_id, nfe_id, chave_acesso, status, erro, etapa }) {
   const client = getClient();
   if (!client) return;
 
   try {
     const { error } = await client.from('shopee_nf_sync').insert({
-      loja: 'AMBTotal',
+      loja: loja || 'desconhecida',
       order_sn,
       pedido_bling_id,
       nfe_id,
       chave_acesso,
       status,
-      etapa,        // 'upload_invoice' | 'ship_order' | 'detect'
+      etapa,
       erro,
       criado_em: new Date().toISOString()
     });
@@ -44,10 +39,8 @@ async function logSync({ order_sn, pedido_bling_id, nfe_id, chave_acesso, status
   }
 }
 
-/**
- * Verifica se um order_sn ja foi sincronizado com sucesso nas ultimas N horas
- * (evita reprocessamento desnecessario)
- */
+// Idempotencia: ja foi sincronizado com sucesso (ship_order) recentemente?
+// Sem Supabase, retorna false (sempre processa) - seguro pois a Shopee rejeita NF duplicada.
 async function jaSincronizado(orderSn, horasAtras = 6) {
   const client = getClient();
   if (!client) return false;
@@ -67,13 +60,9 @@ async function jaSincronizado(orderSn, horasAtras = 6) {
     console.warn('[supabase-log] jaSincronizado err:', error.message);
     return false;
   }
-
   return (data || []).length > 0;
 }
 
-/**
- * Busca ultimas N execucoes pra mostrar no endpoint /logs
- */
 async function ultimasExecucoes(limit = 50) {
   const client = getClient();
   if (!client) return [];
@@ -81,7 +70,6 @@ async function ultimasExecucoes(limit = 50) {
   const { data, error } = await client
     .from('shopee_nf_sync')
     .select('*')
-    .eq('loja', 'AMBTotal')
     .order('criado_em', { ascending: false })
     .limit(limit);
 
@@ -89,7 +77,6 @@ async function ultimasExecucoes(limit = 50) {
     console.warn('[supabase-log] ultimasExecucoes err:', error.message);
     return [];
   }
-
   return data || [];
 }
 
