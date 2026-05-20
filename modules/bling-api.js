@@ -96,17 +96,35 @@ async function baixarXmlAutorizado(nfeId) {
     throw new Error(`NF ${nfeId} autorizada mas sem campo xml. Resposta: ${JSON.stringify(nf).slice(0, 500)}`);
   }
 
-  // ---- LOG DIAGNOSTICO ----
-  console.log(`[baixarXmlAutorizado] nfeId=${nfeId} chave=${nf.chaveAcesso} numero=${nf.numero}`);
-  console.log(`[baixarXmlAutorizado] campo xml (primeiros 80 chars): ${String(nf.xml).slice(0, 80)}`);
-  console.log(`[baixarXmlAutorizado] tamanho campo xml: ${String(nf.xml).length}`);
-  // --------------------------
+  // O Bling retorna no campo "xml" uma URL pra baixar o XML, nao o conteudo.
+  // Detecta se e URL e baixa o conteudo real.
+  let xmlConteudo;
+  const campoXml = String(nf.xml).trim();
+  if (campoXml.startsWith('http://') || campoXml.startsWith('https://')) {
+    console.log(`[baixarXmlAutorizado] campo xml e URL, baixando conteudo: ${campoXml}`);
+    const resp = await fetch(campoXml);
+    if (!resp.ok) {
+      throw new Error(`Falha ao baixar XML da URL Bling (HTTP ${resp.status}): ${campoXml}`);
+    }
+    xmlConteudo = await resp.text();
+  } else {
+    // fallback: campo ja contem o XML (texto puro)
+    xmlConteudo = campoXml;
+  }
+
+  // Garante que e um XML valido (deve comecar com <?xml ou <)
+  const inicioXml = xmlConteudo.trimStart().slice(0, 60);
+  console.log(`[baixarXmlAutorizado] XML real (primeiros 60 chars): ${inicioXml}`);
+  console.log(`[baixarXmlAutorizado] tamanho XML real: ${xmlConteudo.length} chars`);
+  if (!inicioXml.includes('<?xml') && !inicioXml.includes('<')) {
+    throw new Error(`Conteudo baixado nao parece XML: ${inicioXml}`);
+  }
 
   return {
     chave: nf.chaveAcesso,
     numero: nf.numero,
     serie: nf.serie,
-    xmlBase64: nf.xml,
+    xmlConteudo: xmlConteudo,
     situacao: nf.situacao,
     dataEmissao: nf.dataEmissao
   };
