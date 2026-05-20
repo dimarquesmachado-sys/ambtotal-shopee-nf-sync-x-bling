@@ -194,24 +194,52 @@ async function buscarDetalhesPedidos(orderSnList) {
 // =============================================================================
 
 /**
- * ====================================================================
- * TODO_DOC: CONFIRMAR ENDPOINT NA DOC OFICIAL SHOPEE
- * ====================================================================
- * Endpoint provavel: POST /api/v2/order/upload_invoice_document
- * Payload provavel: { order_sn, file_name, file (base64) }
- * Confirmar em: https://open.shopee.com/documents (logado)
- * ====================================================================
+ * Upload da NF-e pra Shopee (PH/BR local seller).
+ * Endpoint oficial: POST /api/v2/order/upload_invoice_doc
+ * file_type: 1=pdf, 2=jpeg, 3=png, 4=xml. Usamos 4 (XML).
+ * O arquivo vai como multipart/form-data (binario), limite 1MB.
+ * A assinatura/auth vai na query string (igual aos outros endpoints).
  */
 async function uploadInvoice(orderSn, xmlBase64, chaveAcesso, numeroNf) {
-  const apiPath = `/api/v2/order/upload_invoice_document`;
-  const body = {
-    order_sn: orderSn,
-    file_name: `NFe${chaveAcesso || numeroNf}.xml`,
-    file: xmlBase64
-  };
+  const FormData = require('form-data');
+  const apiPath = `/api/v2/order/upload_invoice_doc`;
 
-  const { ok, data } = await shopeeApiCall(apiPath, 'POST', body);
-  if (!ok) throw new Error(`Shopee uploadInvoice erro: ${JSON.stringify(data)}`);
+  const tokens = await getValidShopeeToken();
+  const timestamp = Math.floor(Date.now() / 1000);
+  const partnerId = parseInt(process.env.AMB_SHOPEE_PARTNER_ID);
+  const sign = generateSign(apiPath, timestamp, tokens.access_token, tokens.shop_id);
+
+  const queryParams = [
+    `partner_id=${partnerId}`,
+    `timestamp=${timestamp}`,
+    `access_token=${tokens.access_token}`,
+    `shop_id=${tokens.shop_id}`,
+    `sign=${sign}`
+  ].join('&');
+
+  // XML vem em base64 do Bling -> converte pra buffer binario
+  const xmlBuffer = Buffer.from(xmlBase64, 'base64');
+  if (xmlBuffer.length > 1024 * 1024) {
+    throw new Error(`XML da NF excede 1MB (${xmlBuffer.length} bytes) - limite Shopee`);
+  }
+
+  const form = new FormData();
+  form.append('order_sn', orderSn);
+  form.append('file_type', '4'); // 4 = xml
+  form.append('file', xmlBuffer, {
+    filename: `NFe${chaveAcesso || numeroNf || orderSn}.xml`,
+    contentType: 'application/xml'
+  });
+
+  const url = `${SHOPEE_BASE}${apiPath}?${queryParams}`;
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: form.getHeaders(),
+    body: form
+  });
+
+  const data = await response.json();
+  if (data.error) throw new Error(`Shopee uploadInvoice erro: ${JSON.stringify(data)}`);
   return data;
 }
 
