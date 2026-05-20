@@ -8,6 +8,8 @@ const fs = require('fs');
 const path = require('path');
 
 const SHOPEE_BASE = process.env.AMB_SHOPEE_BASE_URL || 'https://partner.shopeemobile.com';
+// Dominio especifico pro upload de NF-e (Brazil local seller). Auth/listagem continuam no dominio global.
+const SHOPEE_BASE_BR = process.env.AMB_SHOPEE_BASE_URL_BR || 'https://openplatform.shopee.com.br';
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '..', 'data');
 const TOKEN_FILE = path.join(DATA_DIR, 'tokens-shopee.json');
 
@@ -231,7 +233,7 @@ async function uploadInvoice(orderSn, xmlBase64, chaveAcesso, numeroNf) {
     contentType: 'application/xml'
   });
 
-  const url = `${SHOPEE_BASE}${apiPath}?${queryParams}`;
+  const url = `${SHOPEE_BASE_BR}${apiPath}?${queryParams}`;
   const response = await fetch(url, {
     method: 'POST',
     headers: form.getHeaders(),
