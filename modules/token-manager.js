@@ -5,7 +5,8 @@ const fetch = require('node-fetch');
 const fs = require('fs');
 const path = require('path');
 
-const TOKEN_FILE = path.join(__dirname, '..', 'data', 'tokens-bling.json');
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '..', 'data');
+const TOKEN_FILE = path.join(DATA_DIR, 'tokens-bling.json');
 
 function ensureDataDir() {
   const dir = path.dirname(TOKEN_FILE);
