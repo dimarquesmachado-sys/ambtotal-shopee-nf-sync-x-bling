@@ -257,27 +257,49 @@ async function getShippingParameter(loja, orderSn) {
   const data = await response.json();
 
   if (data.error) throw new Error(`[${loja.key}] Shopee get_shipping_parameter erro: ${JSON.stringify(data)}`);
+  console.log(`[getShippingParameter][${loja.key}] order=${orderSn} retorno: ${JSON.stringify(data.response)}`);
   return data.response;
 }
 
 async function shipOrder(loja, orderSn) {
-  const shippingParams = await getShippingParameter(loja, orderSn);
+  const sp = await getShippingParameter(loja, orderSn);
 
   const apiPath = `/api/v2/logistics/ship_order`;
   const body = { order_sn: orderSn };
 
-  if (shippingParams.pickup) {
-    body.pickup = {
-      address_id: shippingParams.pickup.address_list?.[0]?.address_id,
-      pickup_time_id: shippingParams.pickup.address_list?.[0]?.time_slot_list?.[0]?.pickup_time_id
-    };
-  } else if (shippingParams.dropoff) {
-    body.dropoff = {
-      branch_id: shippingParams.dropoff.branch_list?.[0]?.branch_id || 0
-    };
+  // A Shopee informa em "info_needed" quais campos sao obrigatorios pra ESTE pedido.
+  // Se info_needed.pickup existir -> e coleta (pickup). Se .dropoff -> e dropoff/postagem.
+  const infoNeeded = sp.info_needed || {};
+  const temPickup = Array.isArray(infoNeeded.pickup);
+  const temDropoff = Array.isArray(infoNeeded.dropoff);
+
+  if (temPickup) {
+    // COLETA (Entrega Direta): pega o primeiro endereco e o primeiro horario disponivel
+    const addr = sp.pickup?.address_list?.[0];
+    const pickup = {};
+    if (addr) {
+      pickup.address_id = addr.address_id;
+      const slot = addr.time_slot_list?.[0];
+      if (slot?.pickup_time_id) pickup.pickup_time_id = slot.pickup_time_id;
+    }
+    body.pickup = pickup;
+    console.log(`[shipOrder][${loja.key}] modo PICKUP (coleta) body.pickup=${JSON.stringify(pickup)}`);
+  } else if (temDropoff) {
+    // POSTAGEM (Xpress/dropoff)
+    const dropoff = {};
+    const branch = sp.dropoff?.branch_list?.[0];
+    if (branch?.branch_id) dropoff.branch_id = branch.branch_id;
+    body.dropoff = dropoff;
+    console.log(`[shipOrder][${loja.key}] modo DROPOFF (postagem) body.dropoff=${JSON.stringify(dropoff)}`);
+  } else {
+    // Alguns canais (ex: Shopee Xpress ja roteirizado) nao precisam de pickup/dropoff:
+    // basta chamar ship_order so com order_sn. Mandamos dropoff vazio como padrao seguro.
+    body.dropoff = {};
+    console.log(`[shipOrder][${loja.key}] sem info_needed pickup/dropoff, enviando dropoff vazio`);
   }
 
   const { ok, data } = await shopeeApiCall(loja, apiPath, 'POST', body);
+  console.log(`[shipOrder][${loja.key}] resposta: ${JSON.stringify(data)}`);
   if (!ok) throw new Error(`[${loja.key}] Shopee ship_order erro: ${JSON.stringify(data)}`);
   return data;
 }
