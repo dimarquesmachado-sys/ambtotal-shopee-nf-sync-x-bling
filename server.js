@@ -251,16 +251,36 @@ app.get('/logs', async (req, res) => {
 // CRON
 // =============================================================================
 
-const CRON_EXPR = '*/10 6-22 * * *';
-cron.schedule(CRON_EXPR, async () => {
-  console.log('[cron] Disparando ciclo de todas as lojas');
+// Trava simples: evita que dois disparos rodem o ciclo ao mesmo tempo
+// (importante porque os dois agendamentos se sobrepoem em alguns minutos).
+let cicloRodando = false;
+
+async function dispararCiclo(origem) {
+  if (cicloRodando) {
+    console.log(`[cron][${origem}] Ciclo anterior ainda rodando, pulando este disparo`);
+    return;
+  }
+  cicloRodando = true;
+  console.log(`[cron][${origem}] Disparando ciclo de todas as lojas`);
   try {
     await engine.cicloTodasLojas({ dryRun: false });
   } catch (e) {
-    console.error('[cron] Erro no ciclo:', e.message);
+    console.error(`[cron][${origem}] Erro no ciclo:`, e.message);
+  } finally {
+    cicloRodando = false;
   }
-}, { timezone: 'America/Sao_Paulo' });
-console.log(`[cron] Agendado: ${CRON_EXPR} (America/Sao_Paulo)`);
+}
+
+// Janela CRITICA do motoboy: 11h-13h, a cada 5 min (cobre 12:00, 12:05, 12:10, 12:15)
+const CRON_CRITICO = '*/5 11-12 * * *';
+cron.schedule(CRON_CRITICO, () => dispararCiclo('critico-5min'), { timezone: 'America/Sao_Paulo' });
+
+// Resto do dia: 24h, a cada 10 min.
+// (Nos minutos multiplos de 10 dentro da janela critica, a trava evita execucao dupla.)
+const CRON_NORMAL = '*/10 * * * *';
+cron.schedule(CRON_NORMAL, () => dispararCiclo('normal-10min'), { timezone: 'America/Sao_Paulo' });
+
+console.log(`[cron] Agendado CRITICO: ${CRON_CRITICO} | NORMAL: ${CRON_NORMAL} (America/Sao_Paulo)`);
 
 app.listen(PORT, () => {
   console.log(`[server] shopee-nf-sync multi-loja rodando na porta ${PORT}`);
