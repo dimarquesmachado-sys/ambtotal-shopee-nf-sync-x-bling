@@ -21,19 +21,44 @@ async function processarPedido(loja, orderSn) {
 
   const nfData = await bling.baixarXmlAutorizado(loja, nfeId);
 
-  await shopee.uploadInvoice(loja, orderSn, nfData.xmlConteudo, nfData.chave, nfData.numero);
-  await log.logSync({
-    order_sn: orderSn, loja: loja.key, pedido_bling_id: pedidoBling.id, nfe_id: nfeId,
-    chave_acesso: nfData.chave, status: 'sucesso', etapa: 'upload_invoice'
-  });
+  // Tenta subir a NF. Se ja existe na Shopee (erro de duplicada/ja enviada),
+  // nao aborta - segue pro organizar envio, que pode ser o que falta.
+  let nfJaEstava = false;
+  try {
+    await shopee.uploadInvoice(loja, orderSn, nfData.xmlConteudo, nfData.chave, nfData.numero);
+    await log.logSync({
+      order_sn: orderSn, loja: loja.key, pedido_bling_id: pedidoBling.id, nfe_id: nfeId,
+      chave_acesso: nfData.chave, status: 'sucesso', etapa: 'upload_invoice'
+    });
+  } catch (e) {
+    const msg = String(e.message || '');
+    // Erros que significam "a NF ja esta la" - nao sao falha real
+    if (msg.includes('arranged') || msg.includes('duplicat') || msg.includes('already')) {
+      nfJaEstava = true;
+      console.log(`[sync-engine][${loja.key}] NF ja estava na Shopee p/ ${orderSn}, seguindo pro envio`);
+    } else {
+      throw e; // erro real no upload, aborta
+    }
+  }
 
-  // Aguarda processar e dispara organizar envio
-  await new Promise(r => setTimeout(r, 30000));
-  await shopee.shipOrder(loja, orderSn);
-  await log.logSync({
-    order_sn: orderSn, loja: loja.key, pedido_bling_id: pedidoBling.id, nfe_id: nfeId,
-    chave_acesso: nfData.chave, status: 'sucesso', etapa: 'ship_order'
-  });
+  // Aguarda a Shopee processar a NF antes de organizar (validacao SERPRO)
+  if (!nfJaEstava) await new Promise(r => setTimeout(r, 30000));
+
+  // Organiza envio/coleta. Se falhar porque ja foi organizado, nao e erro real.
+  try {
+    await shopee.shipOrder(loja, orderSn);
+    await log.logSync({
+      order_sn: orderSn, loja: loja.key, pedido_bling_id: pedidoBling.id, nfe_id: nfeId,
+      chave_acesso: nfData.chave, status: 'sucesso', etapa: 'ship_order'
+    });
+  } catch (e) {
+    const msg = String(e.message || '');
+    if (msg.includes('arranged') || msg.includes('already') || msg.includes('has been')) {
+      console.log(`[sync-engine][${loja.key}] Envio ja estava organizado p/ ${orderSn}`);
+    } else {
+      throw e;
+    }
+  }
 
   return { order_sn: orderSn, loja: loja.key, pedido_bling_id: pedidoBling.id, nfe_id: nfeId, chave: nfData.chave, status: 'sucesso' };
 }
