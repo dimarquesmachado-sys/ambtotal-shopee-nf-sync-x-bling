@@ -123,7 +123,7 @@ async function shopeeApiCall(loja, apiPath, method = 'GET', body = null) {
 // ORDER LISTING
 // =============================================================================
 
-async function listarPedidosPendentesNf(loja, diasAtras = 7) {
+async function listarPedidosPorStatus(loja, orderStatus, diasAtras = 7) {
   const agora = Math.floor(Date.now() / 1000);
   const inicio = agora - (diasAtras * 24 * 60 * 60);
 
@@ -143,15 +143,25 @@ async function listarPedidosPendentesNf(loja, diasAtras = 7) {
     `time_from=${inicio}`,
     `time_to=${agora}`,
     `page_size=100`,
-    `order_status=INVOICE_PENDING`
+    `order_status=${orderStatus}`
   ].join('&');
 
   const url = `${SHOPEE_BASE}${apiPath}?${queryParams}`;
   const response = await fetch(url);
   const data = await response.json();
 
-  if (data.error) throw new Error(`[${loja.key}] Shopee get_order_list erro: ${JSON.stringify(data)}`);
+  if (data.error) throw new Error(`[${loja.key}] Shopee get_order_list (${orderStatus}) erro: ${JSON.stringify(data)}`);
   return data.response?.order_list || [];
+}
+
+// Pedidos aguardando NF (precisam ter a NF enviada)
+async function listarPedidosPendentesNf(loja, diasAtras = 7) {
+  return listarPedidosPorStatus(loja, 'INVOICE_PENDING', diasAtras);
+}
+
+// Pedidos prontos pra enviar (ja tem NF, podem precisar organizar envio/coleta)
+async function listarPedidosReadyToShip(loja, diasAtras = 7) {
+  return listarPedidosPorStatus(loja, 'READY_TO_SHIP', diasAtras);
 }
 
 async function buscarDetalhesPedidos(loja, orderSnList) {
@@ -261,6 +271,54 @@ async function getShippingParameter(loja, orderSn) {
   return data.response;
 }
 
+// Verifica se o pedido esta PRONTO pra organizar envio, seguindo a recomendacao
+// oficial da Shopee (FAQ 727). Retorna { pronto, jaArranjado, status, motivo }.
+// - pronto=true  -> pode chamar ship_order
+// - jaArranjado=true -> envio ja foi organizado (nao precisa chamar)
+// - pronto=false e jaArranjado=false -> ainda nao esta pronto (tentar no proximo ciclo)
+async function checarProntidaoEnvio(loja, orderSn) {
+  const apiPath = `/api/v2/order/get_order_detail`;
+  const tokens = await getValidShopeeToken(loja);
+  const timestamp = Math.floor(Date.now() / 1000);
+  const partnerId = parseInt(loja.shopee.partnerId);
+  const sign = generateSign(loja, apiPath, timestamp, tokens.access_token, tokens.shop_id);
+
+  const queryParams = [
+    `partner_id=${partnerId}`,
+    `timestamp=${timestamp}`,
+    `access_token=${tokens.access_token}`,
+    `shop_id=${tokens.shop_id}`,
+    `sign=${sign}`,
+    `order_sn_list=${orderSn}`,
+    `response_optional_fields=order_status`
+  ].join('&');
+
+  const url = `${SHOPEE_BASE}${apiPath}?${queryParams}`;
+  const response = await fetch(url);
+  const data = await response.json();
+
+  if (data.error) {
+    // Se nao conseguiu checar, deixa seguir (o ship_order tem seu proprio tratamento)
+    console.log(`[checarProntidao][${loja.key}] nao foi possivel checar (${JSON.stringify(data)}), seguindo`);
+    return { pronto: true, jaArranjado: false, status: 'desconhecido', motivo: 'check_falhou' };
+  }
+
+  const pedido = data.response?.order_list?.[0];
+  const orderStatus = pedido?.order_status;
+  console.log(`[checarProntidao][${loja.key}] order=${orderSn} order_status=${orderStatus}`);
+
+  // READY_TO_SHIP = pronto pra organizar envio.
+  // PROCESSED / SHIPPED / COMPLETED / etc = envio ja organizado ou ja avancou.
+  if (orderStatus === 'READY_TO_SHIP') {
+    return { pronto: true, jaArranjado: false, status: orderStatus };
+  }
+  if (['PROCESSED', 'SHIPPED', 'TO_CONFIRM_RECEIVE', 'COMPLETED', 'IN_CANCEL', 'CANCELLED'].includes(orderStatus)) {
+    return { pronto: false, jaArranjado: true, status: orderStatus };
+  }
+  // INVOICE_PENDING, UNPAID, ou qualquer outro -> ainda nao pronto
+  return { pronto: false, jaArranjado: false, status: orderStatus };
+}
+
 async function shipOrder(loja, orderSn) {
   const sp = await getShippingParameter(loja, orderSn);
 
@@ -311,8 +369,11 @@ module.exports = {
   saveShopeeTokens,
   generateSign,
   listarPedidosPendentesNf,
+  listarPedidosReadyToShip,
+  listarPedidosPorStatus,
   buscarDetalhesPedidos,
   uploadInvoice,
   getShippingParameter,
+  checarProntidaoEnvio,
   shipOrder
 };
