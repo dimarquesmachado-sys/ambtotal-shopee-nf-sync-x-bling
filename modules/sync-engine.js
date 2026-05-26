@@ -41,10 +41,33 @@ async function processarPedido(loja, orderSn) {
     }
   }
 
-  // Aguarda a Shopee processar a NF antes de organizar (validacao SERPRO)
+  // Aguarda a Shopee processar a NF antes de checar prontidao (validacao SERPRO)
   if (!nfJaEstava) await new Promise(r => setTimeout(r, 30000));
 
-  // Organiza envio/coleta. Se falhar porque ja foi organizado, nao e erro real.
+  // Antes de organizar envio, CHECA se o pedido esta pronto (recomendacao oficial
+  // Shopee FAQ 727: so chamar ship_order quando READY_TO_SHIP e nao arranjado).
+  // Isso evita chamadas que falhariam e derrubariam a taxa de sucesso do app.
+  let prontidao;
+  try {
+    prontidao = await shopee.checarProntidaoEnvio(loja, orderSn);
+  } catch (e) {
+    console.log(`[sync-engine][${loja.key}] erro ao checar prontidao ${orderSn}: ${e.message}`);
+    prontidao = { pronto: true, jaArranjado: false, status: 'check_erro' };
+  }
+
+  if (prontidao.jaArranjado) {
+    console.log(`[sync-engine][${loja.key}] ${orderSn} envio ja organizado (status=${prontidao.status}), nada a fazer`);
+    return { order_sn: orderSn, loja: loja.key, pedido_bling_id: pedidoBling.id, nfe_id: nfeId, chave: nfData.chave, status: 'sucesso', detalhe: 'ja_arranjado' };
+  }
+
+  if (!prontidao.pronto) {
+    // Ainda nao esta READY_TO_SHIP (NF em validacao, alocando, etc).
+    // NAO chama ship_order agora - sera tentado no proximo ciclo do cron.
+    console.log(`[sync-engine][${loja.key}] ${orderSn} ainda nao pronto p/ envio (status=${prontidao.status}), tentar proximo ciclo`);
+    return { order_sn: orderSn, loja: loja.key, pedido_bling_id: pedidoBling.id, nfe_id: nfeId, chave: nfData.chave, status: 'aguardando_prontidao', order_status: prontidao.status };
+  }
+
+  // Pedido READY_TO_SHIP -> organiza envio/coleta. Se falhar por estado, nao e erro real.
   try {
     await shopee.shipOrder(loja, orderSn);
     await log.logSync({
@@ -53,8 +76,8 @@ async function processarPedido(loja, orderSn) {
     });
   } catch (e) {
     const msg = String(e.message || '');
-    if (msg.includes('arranged') || msg.includes('already') || msg.includes('has been')) {
-      console.log(`[sync-engine][${loja.key}] Envio ja estava organizado p/ ${orderSn}`);
+    if (msg.includes('arranged') || msg.includes('already') || msg.includes('has been') || msg.includes('not ready')) {
+      console.log(`[sync-engine][${loja.key}] Envio ja estava organizado/nao pronto p/ ${orderSn}`);
     } else {
       throw e;
     }
@@ -72,22 +95,38 @@ async function cicloLoja(loja, { dryRun = false } = {}) {
 
   console.log(`[sync-engine][${loja.key}] === Iniciando ciclo ===`);
 
-  let listaPedidos;
+  // Busca 2 grupos:
+  // 1) INVOICE_PENDING: pedidos que precisam ter a NF enviada (+ organizar envio depois)
+  // 2) READY_TO_SHIP: pedidos que ja tem NF mas podem ter envio nao organizado
+  let pendentesNf = [];
+  let readyToShip = [];
   try {
-    listaPedidos = await shopee.listarPedidosPendentesNf(loja, 7);
+    pendentesNf = await shopee.listarPedidosPendentesNf(loja, 7);
   } catch (e) {
-    console.error(`[sync-engine][${loja.key}] Erro listando Shopee:`, e.message);
+    console.error(`[sync-engine][${loja.key}] Erro listando INVOICE_PENDING:`, e.message);
     resultado.erro_geral = e.message;
     return resultado;
   }
+  try {
+    readyToShip = await shopee.listarPedidosReadyToShip(loja, 7);
+  } catch (e) {
+    console.error(`[sync-engine][${loja.key}] Erro listando READY_TO_SHIP:`, e.message);
+    // nao aborta - segue com os INVOICE_PENDING ao menos
+  }
+
+  // Junta as duas listas sem duplicar order_sn
+  const mapa = new Map();
+  for (const p of pendentesNf) mapa.set(p.order_sn, p);
+  for (const p of readyToShip) if (!mapa.has(p.order_sn)) mapa.set(p.order_sn, p);
+  const listaPedidos = Array.from(mapa.values());
 
   if (listaPedidos.length === 0) {
-    console.log(`[sync-engine][${loja.key}] Nenhum pedido INVOICE_PENDING`);
+    console.log(`[sync-engine][${loja.key}] Nenhum pedido pendente (NF ou envio)`);
     return resultado;
   }
 
   resultado.detectados = listaPedidos.length;
-  console.log(`[sync-engine][${loja.key}] Detectados ${listaPedidos.length} pendente(s) de NF`);
+  console.log(`[sync-engine][${loja.key}] Detectados ${listaPedidos.length} (INVOICE_PENDING=${pendentesNf.length}, READY_TO_SHIP=${readyToShip.length})`);
 
   if (dryRun) {
     resultado.detalhes = listaPedidos.map(p => ({ order_sn: p.order_sn, status: 'dry_run' }));
