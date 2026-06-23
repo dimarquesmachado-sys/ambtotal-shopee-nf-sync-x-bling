@@ -52,7 +52,8 @@ async function processarPedido(loja, orderSn) {
     prontidao = await shopee.checarProntidaoEnvio(loja, orderSn);
   } catch (e) {
     console.log(`[sync-engine][${loja.key}] erro ao checar prontidao ${orderSn}: ${e.message}`);
-    prontidao = { pronto: true, jaArranjado: false, status: 'check_erro' };
+    // Se o check falhou, NAO chama ship_order as cegas (evita falha que conta na metrica).
+    prontidao = { pronto: false, jaArranjado: false, status: 'check_erro' };
   }
 
   if (prontidao.jaArranjado) {
@@ -76,8 +77,11 @@ async function processarPedido(loja, orderSn) {
     });
   } catch (e) {
     const msg = String(e.message || '');
-    if (msg.includes('arranged') || msg.includes('already') || msg.includes('has been') || msg.includes('not ready')) {
-      console.log(`[sync-engine][${loja.key}] Envio ja estava organizado/nao pronto p/ ${orderSn}`);
+    // Erros de estado/timing que NAO sao falha real nossa - serao resolvidos no proximo ciclo.
+    if (msg.includes('arranged') || msg.includes('already') || msg.includes('has been') ||
+        msg.includes('not ready') || msg.includes('lack_of_invoice_data') || msg.includes('Pending invoice')) {
+      console.log(`[sync-engine][${loja.key}] ${orderSn} envio nao concluido (estado/timing), tentar proximo ciclo`);
+      return { order_sn: orderSn, loja: loja.key, pedido_bling_id: pedidoBling.id, nfe_id: nfeId, chave: nfData.chave, status: 'aguardando_prontidao', detalhe: msg.slice(0, 120) };
     } else {
       throw e;
     }
