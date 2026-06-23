@@ -276,6 +276,12 @@ async function getShippingParameter(loja, orderSn) {
 // - pronto=true  -> pode chamar ship_order
 // - jaArranjado=true -> envio ja foi organizado (nao precisa chamar)
 // - pronto=false e jaArranjado=false -> ainda nao esta pronto (tentar no proximo ciclo)
+// Checa prontidao de envio usando a API a NIVEL DE PACOTE (recomendacao oficial
+// Shopee FAQ 727). Olha fulfillment_status e is_shipment_arranged, que sao mais
+// precisos que o order_status. Retorna { pronto, jaArranjado, status, motivo }.
+//   pronto=true      -> fulfillment_status=LOGISTICS_READY e is_shipment_arranged=false
+//   jaArranjado=true -> is_shipment_arranged=true ou fulfillment_status=LOGISTICS_REQUEST_CREATED
+//   senao            -> ainda nao pronto (NF validando, alocando, etc) -> tentar proximo ciclo
 async function checarProntidaoEnvio(loja, orderSn) {
   const apiPath = `/api/v2/order/get_order_detail`;
   const tokens = await getValidShopeeToken(loja);
@@ -283,6 +289,7 @@ async function checarProntidaoEnvio(loja, orderSn) {
   const partnerId = parseInt(loja.shopee.partnerId);
   const sign = generateSign(loja, apiPath, timestamp, tokens.access_token, tokens.shop_id);
 
+  // Pede tambem os campos de pacote/fulfillment (mais precisos que order_status)
   const queryParams = [
     `partner_id=${partnerId}`,
     `timestamp=${timestamp}`,
@@ -290,7 +297,7 @@ async function checarProntidaoEnvio(loja, orderSn) {
     `shop_id=${tokens.shop_id}`,
     `sign=${sign}`,
     `order_sn_list=${orderSn}`,
-    `response_optional_fields=order_status`
+    `response_optional_fields=order_status,package_list`
   ].join('&');
 
   const url = `${SHOPEE_BASE}${apiPath}?${queryParams}`;
@@ -298,24 +305,38 @@ async function checarProntidaoEnvio(loja, orderSn) {
   const data = await response.json();
 
   if (data.error) {
-    // Se nao conseguiu checar, deixa seguir (o ship_order tem seu proprio tratamento)
-    console.log(`[checarProntidao][${loja.key}] nao foi possivel checar (${JSON.stringify(data)}), seguindo`);
-    return { pronto: true, jaArranjado: false, status: 'desconhecido', motivo: 'check_falhou' };
+    // Se nao conseguiu checar, NAO chama ship_order (evita falha as cegas que conta na metrica).
+    console.log(`[checarProntidao][${loja.key}] nao foi possivel checar (${JSON.stringify(data)}), aguardando proximo ciclo`);
+    return { pronto: false, jaArranjado: false, status: 'check_falhou', motivo: 'check_falhou' };
   }
 
   const pedido = data.response?.order_list?.[0];
   const orderStatus = pedido?.order_status;
-  console.log(`[checarProntidao][${loja.key}] order=${orderSn} order_status=${orderStatus}`);
+  const pkg = pedido?.package_list?.[0] || {};
+  const fulfillment = pkg.fulfillment_status;
+  const arranjado = pkg.is_shipment_arranged;
 
-  // READY_TO_SHIP = pronto pra organizar envio.
-  // PROCESSED / SHIPPED / COMPLETED / etc = envio ja organizado ou ja avancou.
+  console.log(`[checarProntidao][${loja.key}] order=${orderSn} order_status=${orderStatus} fulfillment_status=${fulfillment} is_shipment_arranged=${arranjado}`);
+
+  // 1) Se a API retornou os campos de pacote, usamos eles (metodo preciso da doc)
+  if (typeof fulfillment === 'string' || typeof arranjado === 'boolean') {
+    if (arranjado === true || fulfillment === 'LOGISTICS_REQUEST_CREATED') {
+      return { pronto: false, jaArranjado: true, status: fulfillment || orderStatus };
+    }
+    if (fulfillment === 'LOGISTICS_READY' && arranjado === false) {
+      return { pronto: true, jaArranjado: false, status: fulfillment };
+    }
+    // Qualquer outro fulfillment_status (allocating, pending, etc) -> ainda nao pronto
+    return { pronto: false, jaArranjado: false, status: fulfillment || orderStatus };
+  }
+
+  // 2) Fallback: se a API nao trouxe package_list, usa order_status (menos preciso)
   if (orderStatus === 'READY_TO_SHIP') {
     return { pronto: true, jaArranjado: false, status: orderStatus };
   }
   if (['PROCESSED', 'SHIPPED', 'TO_CONFIRM_RECEIVE', 'COMPLETED', 'IN_CANCEL', 'CANCELLED'].includes(orderStatus)) {
     return { pronto: false, jaArranjado: true, status: orderStatus };
   }
-  // INVOICE_PENDING, UNPAID, ou qualquer outro -> ainda nao pronto
   return { pronto: false, jaArranjado: false, status: orderStatus };
 }
 
