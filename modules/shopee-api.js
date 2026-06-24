@@ -6,7 +6,55 @@ const fetch = require('node-fetch');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+const https = require('https');
 const { SHOPEE_BASE } = require('./lojas');
+
+// Agent HTTPS que NAO reusa conexoes (keepAlive:false). O reuso de socket e a
+// causa comum do erro "Premature close" no node-fetch em alguns ambientes (Render).
+// Forcamos IPv4 tambem (alguns hosts tem egress IPv6 instavel).
+const httpsAgent = new https.Agent({ keepAlive: false, family: 4 });
+
+// fetch com retry para chamadas a Shopee. Resiliente a "Premature close",
+// ECONNRESET, socket hang up e timeouts. Tenta ate maxTentativas vezes.
+async function fetchShopeeComRetry(url, opcoes = {}, maxTentativas = 4) {
+  let ultimoErro;
+  for (let tentativa = 1; tentativa <= maxTentativas; tentativa++) {
+    try {
+      const resp = await fetch(url, {
+        agent: httpsAgent,
+        timeout: 30000,
+        headers: { 'Connection': 'close', ...(opcoes.headers || {}) },
+        ...opcoes
+      });
+      const texto = await resp.text();
+      if (!texto || texto.length < 2) {
+        throw new Error(`resposta vazia (${texto ? texto.length : 0} bytes)`);
+      }
+      let json;
+      try {
+        json = JSON.parse(texto);
+      } catch (e) {
+        throw new Error(`resposta nao-JSON: ${texto.slice(0, 120)}`);
+      }
+      if (tentativa > 1) console.log(`[fetchShopeeComRetry] sucesso na tentativa ${tentativa}`);
+      return json;
+    } catch (e) {
+      ultimoErro = e;
+      const msg = String(e.message || '');
+      const ehErroRede = msg.includes('Premature close') || msg.includes('ECONNRESET') ||
+                         msg.includes('socket hang up') || msg.includes('network') ||
+                         msg.includes('timeout') || msg.includes('ETIMEDOUT') ||
+                         msg.includes('resposta vazia') || msg.includes('EAI_AGAIN');
+      console.log(`[fetchShopeeComRetry] tentativa ${tentativa}/${maxTentativas} falhou: ${msg}`);
+      if (!ehErroRede || tentativa === maxTentativas) {
+        if (tentativa === maxTentativas) break;
+        throw e; // erro nao-recuperavel: nao adianta repetir
+      }
+      await new Promise(r => setTimeout(r, 1200 * tentativa)); // 1.2s, 2.4s, 3.6s
+    }
+  }
+  throw new Error(`falha apos ${maxTentativas} tentativas: ${ultimoErro && ultimoErro.message}`);
+}
 
 // =============================================================================
 // TOKEN MANAGEMENT (por loja)
@@ -114,9 +162,8 @@ async function shopeeApiCall(loja, apiPath, method = 'GET', body = null) {
   const options = { method, headers: { 'Content-Type': 'application/json' } };
   if (body) options.body = JSON.stringify(body);
 
-  const response = await fetch(url, options);
-  const data = await response.json();
-  return { ok: response.ok && !data.error, data };
+  const data = await fetchShopeeComRetry(url, options);
+  return { ok: !data.error, data };
 }
 
 // =============================================================================
@@ -263,8 +310,7 @@ async function getShippingParameter(loja, orderSn) {
   ].join('&');
 
   const url = `${SHOPEE_BASE}${apiPath}?${queryParams}`;
-  const response = await fetch(url);
-  const data = await response.json();
+  const data = await fetchShopeeComRetry(url);
 
   if (data.error) throw new Error(`[${loja.key}] Shopee get_shipping_parameter erro: ${JSON.stringify(data)}`);
   console.log(`[getShippingParameter][${loja.key}] order=${orderSn} retorno: ${JSON.stringify(data.response)}`);
@@ -299,8 +345,7 @@ async function checarProntidaoEnvio(loja, orderSn) {
     ].join('&');
 
     const url = `${SHOPEE_BASE}${apiPath}?${queryParams}`;
-    const response = await fetch(url);
-    data = await response.json();
+    data = await fetchShopeeComRetry(url);
   } catch (e) {
     // Erro de rede/parse: NAO bloqueia o envio. Marca como pronto pelo fallback
     // (o proprio ship_order tem tratamento gracioso se nao estiver pronto).
