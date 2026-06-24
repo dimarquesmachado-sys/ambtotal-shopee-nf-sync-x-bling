@@ -105,6 +105,42 @@ async function buscarNfPorId(loja, nfeId) {
   return data.data;
 }
 
+// Baixa o XML da URL do Bling com retry. O Bling as vezes derruba a conexao
+// no meio do download ("Premature close" / ECONNRESET / socket hang up).
+// Tentamos ate 4 vezes com espera crescente antes de desistir.
+async function baixarXmlComRetry(loja, url, maxTentativas = 4) {
+  let ultimoErro;
+  for (let tentativa = 1; tentativa <= maxTentativas; tentativa++) {
+    try {
+      const resp = await fetch(url, {
+        headers: { 'Connection': 'close', 'Accept': 'application/xml, text/xml, */*' },
+        timeout: 30000
+      });
+      if (!resp.ok) {
+        throw new Error(`HTTP ${resp.status}`);
+      }
+      const texto = await resp.text();
+      // Valida que veio conteudo de verdade (nao vazio/cortado)
+      if (!texto || texto.length < 100) {
+        throw new Error(`XML vazio ou muito curto (${texto ? texto.length : 0} chars)`);
+      }
+      if (tentativa > 1) {
+        console.log(`[baixarXmlComRetry][${loja.key}] sucesso na tentativa ${tentativa}`);
+      }
+      return texto;
+    } catch (e) {
+      ultimoErro = e;
+      const msg = String(e.message || '');
+      console.log(`[baixarXmlComRetry][${loja.key}] tentativa ${tentativa}/${maxTentativas} falhou: ${msg}`);
+      if (tentativa < maxTentativas) {
+        // Espera crescente: 1.5s, 3s, 4.5s
+        await new Promise(r => setTimeout(r, 1500 * tentativa));
+      }
+    }
+  }
+  throw new Error(`[${loja.key}] Falha ao baixar XML do Bling apos ${maxTentativas} tentativas: ${ultimoErro && ultimoErro.message}`);
+}
+
 async function baixarXmlAutorizado(loja, nfeId) {
   const nf = await buscarNfPorId(loja, nfeId);
 
@@ -124,11 +160,7 @@ async function baixarXmlAutorizado(loja, nfeId) {
   const campoXml = String(nf.xml).trim();
   if (campoXml.startsWith('http://') || campoXml.startsWith('https://')) {
     console.log(`[baixarXmlAutorizado][${loja.key}] campo xml e URL, baixando: ${campoXml}`);
-    const resp = await fetch(campoXml);
-    if (!resp.ok) {
-      throw new Error(`[${loja.key}] Falha ao baixar XML da URL Bling (HTTP ${resp.status})`);
-    }
-    xmlConteudo = await resp.text();
+    xmlConteudo = await baixarXmlComRetry(loja, campoXml);
   } else {
     xmlConteudo = campoXml;
   }
