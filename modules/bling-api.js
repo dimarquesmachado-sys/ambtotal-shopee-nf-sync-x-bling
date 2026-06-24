@@ -2,9 +2,14 @@
 // Interface com Bling, por loja. Cada funcao recebe o objeto "loja" (config de lojas.js).
 
 const fetch = require('node-fetch');
+const https = require('https');
 const { getValidBlingToken, refreshBlingToken } = require('./token-manager');
 
 const BLING_BASE = 'https://api.bling.com.br/Api/v3';
+
+// Agent HTTPS sem reuso de conexao (evita "Premature close" por socket quebrado)
+// e forcando IPv4 (egress IPv6 instavel em alguns ambientes).
+const blingAgent = new https.Agent({ keepAlive: false, family: 4 });
 
 // Throttle: o Bling permite no maximo 3 req/seg. Garantimos um intervalo
 // minimo entre chamadas (fila simples) pra nunca estourar o limite.
@@ -113,6 +118,7 @@ async function baixarXmlComRetry(loja, url, maxTentativas = 4) {
   for (let tentativa = 1; tentativa <= maxTentativas; tentativa++) {
     try {
       const resp = await fetch(url, {
+        agent: blingAgent,
         headers: { 'Connection': 'close', 'Accept': 'application/xml, text/xml, */*' },
         timeout: 30000
       });
