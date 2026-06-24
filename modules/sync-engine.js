@@ -51,9 +51,10 @@ async function processarPedido(loja, orderSn) {
   try {
     prontidao = await shopee.checarProntidaoEnvio(loja, orderSn);
   } catch (e) {
-    console.log(`[sync-engine][${loja.key}] erro ao checar prontidao ${orderSn}: ${e.message}`);
-    // Se o check falhou, NAO chama ship_order as cegas (evita falha que conta na metrica).
-    prontidao = { pronto: false, jaArranjado: false, status: 'check_erro' };
+    console.log(`[sync-engine][${loja.key}] erro ao checar prontidao ${orderSn}: ${e.message} - seguindo p/ envio`);
+    // Erro inesperado no check: melhor TENTAR enviar (ship_order tem tratamento
+    // gracioso) do que travar o pedido indefinidamente.
+    prontidao = { pronto: true, jaArranjado: false, status: 'check_erro' };
   }
 
   if (prontidao.jaArranjado) {
