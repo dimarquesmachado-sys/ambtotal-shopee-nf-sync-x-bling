@@ -276,38 +276,43 @@ async function getShippingParameter(loja, orderSn) {
 // - pronto=true  -> pode chamar ship_order
 // - jaArranjado=true -> envio ja foi organizado (nao precisa chamar)
 // - pronto=false e jaArranjado=false -> ainda nao esta pronto (tentar no proximo ciclo)
-// Checa prontidao de envio usando a API a NIVEL DE PACOTE (recomendacao oficial
-// Shopee FAQ 727). Olha fulfillment_status e is_shipment_arranged, que sao mais
-// precisos que o order_status. Retorna { pronto, jaArranjado, status, motivo }.
-//   pronto=true      -> fulfillment_status=LOGISTICS_READY e is_shipment_arranged=false
-//   jaArranjado=true -> is_shipment_arranged=true ou fulfillment_status=LOGISTICS_REQUEST_CREATED
-//   senao            -> ainda nao pronto (NF validando, alocando, etc) -> tentar proximo ciclo
+// Checa prontidao de envio. Tenta o metodo de PACOTE (fulfillment_status +
+// is_shipment_arranged, recomendado pela FAQ 727) e, se nao der, cai pro
+// order_status. Robusto a erros: nunca lanca excecao - sempre retorna um objeto.
 async function checarProntidaoEnvio(loja, orderSn) {
-  const apiPath = `/api/v2/order/get_order_detail`;
-  const tokens = await getValidShopeeToken(loja);
-  const timestamp = Math.floor(Date.now() / 1000);
-  const partnerId = parseInt(loja.shopee.partnerId);
-  const sign = generateSign(loja, apiPath, timestamp, tokens.access_token, tokens.shop_id);
+  let data;
+  try {
+    const apiPath = `/api/v2/order/get_order_detail`;
+    const tokens = await getValidShopeeToken(loja);
+    const timestamp = Math.floor(Date.now() / 1000);
+    const partnerId = parseInt(loja.shopee.partnerId);
+    const sign = generateSign(loja, apiPath, timestamp, tokens.access_token, tokens.shop_id);
 
-  // Pede tambem os campos de pacote/fulfillment (mais precisos que order_status)
-  const queryParams = [
-    `partner_id=${partnerId}`,
-    `timestamp=${timestamp}`,
-    `access_token=${tokens.access_token}`,
-    `shop_id=${tokens.shop_id}`,
-    `sign=${sign}`,
-    `order_sn_list=${orderSn}`,
-    `response_optional_fields=order_status,package_list`
-  ].join('&');
+    const queryParams = [
+      `partner_id=${partnerId}`,
+      `timestamp=${timestamp}`,
+      `access_token=${tokens.access_token}`,
+      `shop_id=${tokens.shop_id}`,
+      `sign=${sign}`,
+      `order_sn_list=${orderSn}`,
+      `response_optional_fields=order_status,package_list`
+    ].join('&');
 
-  const url = `${SHOPEE_BASE}${apiPath}?${queryParams}`;
-  const response = await fetch(url);
-  const data = await response.json();
+    const url = `${SHOPEE_BASE}${apiPath}?${queryParams}`;
+    const response = await fetch(url);
+    data = await response.json();
+  } catch (e) {
+    // Erro de rede/parse: NAO bloqueia o envio. Marca como pronto pelo fallback
+    // (o proprio ship_order tem tratamento gracioso se nao estiver pronto).
+    console.log(`[checarProntidao][${loja.key}] erro de rede ao checar (${e.message}), seguindo p/ ship_order`);
+    return { pronto: true, jaArranjado: false, status: 'check_rede_falhou' };
+  }
 
   if (data.error) {
-    // Se nao conseguiu checar, NAO chama ship_order (evita falha as cegas que conta na metrica).
-    console.log(`[checarProntidao][${loja.key}] nao foi possivel checar (${JSON.stringify(data)}), aguardando proximo ciclo`);
-    return { pronto: false, jaArranjado: false, status: 'check_falhou', motivo: 'check_falhou' };
+    // A API respondeu com erro (ex: campo nao suportado). Loga e SEGUE pro envio
+    // pelo fallback - melhor tentar enviar do que travar o pedido.
+    console.log(`[checarProntidao][${loja.key}] API retornou erro (${JSON.stringify(data).slice(0,200)}), seguindo p/ ship_order`);
+    return { pronto: true, jaArranjado: false, status: 'check_api_erro' };
   }
 
   const pedido = data.response?.order_list?.[0];
@@ -318,7 +323,7 @@ async function checarProntidaoEnvio(loja, orderSn) {
 
   console.log(`[checarProntidao][${loja.key}] order=${orderSn} order_status=${orderStatus} fulfillment_status=${fulfillment} is_shipment_arranged=${arranjado}`);
 
-  // 1) Se a API retornou os campos de pacote, usamos eles (metodo preciso da doc)
+  // 1) Metodo preciso (pacote), se a API trouxe os campos
   if (typeof fulfillment === 'string' || typeof arranjado === 'boolean') {
     if (arranjado === true || fulfillment === 'LOGISTICS_REQUEST_CREATED') {
       return { pronto: false, jaArranjado: true, status: fulfillment || orderStatus };
@@ -326,11 +331,15 @@ async function checarProntidaoEnvio(loja, orderSn) {
     if (fulfillment === 'LOGISTICS_READY' && arranjado === false) {
       return { pronto: true, jaArranjado: false, status: fulfillment };
     }
-    // Qualquer outro fulfillment_status (allocating, pending, etc) -> ainda nao pronto
+    // fulfillment veio mas nao é READY nem arranjado.
+    // Se o order_status diz READY_TO_SHIP, confia nele e tenta enviar (evita travar).
+    if (orderStatus === 'READY_TO_SHIP') {
+      return { pronto: true, jaArranjado: false, status: orderStatus };
+    }
     return { pronto: false, jaArranjado: false, status: fulfillment || orderStatus };
   }
 
-  // 2) Fallback: se a API nao trouxe package_list, usa order_status (menos preciso)
+  // 2) Fallback por order_status (metodo antigo, comprovado)
   if (orderStatus === 'READY_TO_SHIP') {
     return { pronto: true, jaArranjado: false, status: orderStatus };
   }
