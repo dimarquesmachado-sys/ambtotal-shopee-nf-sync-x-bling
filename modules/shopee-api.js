@@ -144,7 +144,7 @@ async function getValidShopeeToken(loja) {
 // HELPER autenticado (JSON)
 // =============================================================================
 
-async function shopeeApiCall(loja, apiPath, method = 'GET', body = null) {
+async function shopeeApiCall(loja, apiPath, method = 'GET', body = null, extraQuery = null) {
   const tokens = await getValidShopeeToken(loja);
   const timestamp = Math.floor(Date.now() / 1000);
   const partnerId = parseInt(loja.shopee.partnerId);
@@ -158,7 +158,9 @@ async function shopeeApiCall(loja, apiPath, method = 'GET', body = null) {
     `sign=${sign}`
   ].join('&');
 
-  const url = `${SHOPEE_BASE}${apiPath}?${queryParams}`;
+  // extraQuery: parametros de negocio (page_no, create_time_from etc).
+  // NAO entram na assinatura (base = partner+path+ts+token+shop) - seguro.
+  const url = `${SHOPEE_BASE}${apiPath}?${queryParams}` + (extraQuery ? `&${extraQuery}` : '');
   const options = { method, headers: { 'Content-Type': 'application/json' } };
   if (body) options.body = JSON.stringify(body);
 
@@ -443,6 +445,7 @@ module.exports = {
   loadShopeeTokens,
   saveShopeeTokens,
   generateSign,
+  shopeeApiCall,
   listarPedidosPendentesNf,
   listarPedidosReadyToShip,
   listarPedidosPorStatus,
