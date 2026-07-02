@@ -233,6 +233,14 @@ app.get('/:loja/interno/devolucoes', resolverLoja, async (req, res) => {
       return res.json({ ok: rb.ok, bruto: rb.data });
     }
 
+    // Modo debug: get_return_detail CRU de uma solicitacao especifica
+    // (ex: ?detalhe=26060201CAKXTNK) - revela onde mora o tracking
+    if (req.query.detalhe) {
+      const rd = await shopee.shopeeApiCall(loja, '/api/v2/returns/get_return_detail', 'GET', null,
+        `return_sn=${encodeURIComponent(String(req.query.detalhe).trim())}`);
+      return res.json({ ok: rd.ok, detalhe_bruto: rd.data });
+    }
+
     const cache = _cacheDevolucoesLoja[loja.key];
     if (req.query.refresh !== '1' && cache && (Date.now() - cache.ts) < 10 * 60 * 1000) {
       return res.json({ ok: true, cache: true, qtd: cache.dados.length, devolucoes: cache.dados });
@@ -266,14 +274,25 @@ app.get('/:loja/interno/devolucoes', resolverLoja, async (req, res) => {
       })) : [],
     }));
 
-    // Hidrata tracking faltante pelo get_return_detail (poucos casos)
-    const semTracking = dados.filter(x => !x.tracking_number && x.return_sn).slice(0, 30);
+    // Hidrata tracking faltante pelo get_return_detail (poucos casos).
+    // Caca o tracking em campos alternativos - a Shopee varia o ninho.
+    const semTracking = dados.filter(x => !x.tracking_number && x.return_sn).slice(0, 40);
     for (const item of semTracking) {
       await new Promise(s => setTimeout(s, 250));
       const rd = await shopee.shopeeApiCall(loja, '/api/v2/returns/get_return_detail', 'GET', null,
         `return_sn=${encodeURIComponent(item.return_sn)}`);
       const det = rd.ok ? rd.data?.response : null;
-      if (det && det.tracking_number) item.tracking_number = det.tracking_number;
+      if (!det) continue;
+      const candidato = det.tracking_number
+        || (det.return_pickup && det.return_pickup.tracking_number)
+        || (det.logistics && det.logistics.tracking_number)
+        || (Array.isArray(det.return_tracking_info) && det.return_tracking_info[0] && det.return_tracking_info[0].tracking_number)
+        || null;
+      if (candidato) {
+        item.tracking_number = candidato;
+      } else {
+        console.log(`[interno/devolucoes][${loja.key}] ${item.return_sn}: detail sem tracking. Campos: ${Object.keys(det).join(',').slice(0, 300)}`);
+      }
     }
 
     _cacheDevolucoesLoja[loja.key] = { ts: Date.now(), dados };
