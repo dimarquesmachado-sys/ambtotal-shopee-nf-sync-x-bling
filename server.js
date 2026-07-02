@@ -223,7 +223,7 @@ app.get('/:loja/interno/devolucoes', resolverLoja, async (req, res) => {
   const loja = req.loja;
   try {
     // Regra da Shopee: janela maxima de 15 dias por consulta -> fatiamos
-    const dias = Math.min(90, parseInt(req.query.dias, 10) || 60);
+    const dias = Math.min(180, parseInt(req.query.dias, 10) || 120); // padrao 120d (devolucao atrasada existe!)
     const ate = Math.floor(Date.now() / 1000);
     const de = ate - dias * 86400;
     const FATIA = 14 * 86400; // 14d com folga (limite deles e 15)
@@ -292,7 +292,7 @@ app.get('/:loja/interno/devolucoes', resolverLoja, async (req, res) => {
 
     // Hidrata tracking faltante pelo get_return_detail (poucos casos).
     // Caca o tracking em campos alternativos - a Shopee varia o ninho.
-    const semTracking = dados.filter(x => !x.tracking_number && x.return_sn).slice(0, 40);
+    const semTracking = dados.filter(x => !x.tracking_number && x.return_sn).slice(0, 60);
     for (const item of semTracking) {
       await new Promise(s => setTimeout(s, 250));
       const rd = await shopee.shopeeApiCall(loja, '/api/v2/returns/get_return_detail', 'GET', null,
