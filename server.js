@@ -222,14 +222,16 @@ app.get('/:loja/interno/devolucoes', resolverLoja, async (req, res) => {
   }
   const loja = req.loja;
   try {
+    // Regra da Shopee: janela maxima de 15 dias por consulta -> fatiamos
     const dias = Math.min(90, parseInt(req.query.dias, 10) || 60);
     const ate = Math.floor(Date.now() / 1000);
     const de = ate - dias * 86400;
+    const FATIA = 14 * 86400; // 14d com folga (limite deles e 15)
 
     // Modo debug: resposta crua da 1a pagina (ground truth dos campos)
     if (req.query.bruto === '1') {
       const rb = await shopee.shopeeApiCall(loja, '/api/v2/returns/get_return_list', 'GET', null,
-        `page_no=1&page_size=20&create_time_from=${de}&create_time_to=${ate}`);
+        `page_no=1&page_size=20&create_time_from=${ate - FATIA}&create_time_to=${ate}`);
       return res.json({ ok: rb.ok, bruto: rb.data });
     }
 
@@ -247,19 +249,33 @@ app.get('/:loja/interno/devolucoes', resolverLoja, async (req, res) => {
     }
 
     const todos = [];
-    for (let pagina = 1; pagina <= 6; pagina++) {
-      if (pagina > 1) await new Promise(s => setTimeout(s, 300));
-      const r = await shopee.shopeeApiCall(loja, '/api/v2/returns/get_return_list', 'GET', null,
-        `page_no=${pagina}&page_size=100&create_time_from=${de}&create_time_to=${ate}`);
-      if (!r.ok) {
-        return res.status(502).json({ ok: false, erro: 'Shopee get_return_list: ' + JSON.stringify(r.data).slice(0, 400) });
+    let fimFatia = ate;
+    while (fimFatia > de) {
+      const iniFatia = Math.max(de, fimFatia - FATIA);
+      for (let pagina = 1; pagina <= 6; pagina++) {
+        await new Promise(s => setTimeout(s, 250));
+        const r = await shopee.shopeeApiCall(loja, '/api/v2/returns/get_return_list', 'GET', null,
+          `page_no=${pagina}&page_size=100&create_time_from=${iniFatia}&create_time_to=${fimFatia}`);
+        if (!r.ok) {
+          return res.status(502).json({ ok: false, erro: 'Shopee get_return_list: ' + JSON.stringify(r.data).slice(0, 400) });
+        }
+        const lista = r.data?.response?.return || [];
+        todos.push(...lista);
+        if (!r.data?.response?.more || lista.length === 0) break;
       }
-      const lista = r.data?.response?.return || [];
-      todos.push(...lista);
-      if (!r.data?.response?.more || lista.length === 0) break;
+      fimFatia = iniFatia - 1; // proxima fatia (mais antiga), sem sobrepor
     }
 
-    const dados = todos.map(d => ({
+    // dedup de fronteira (garantia)
+    const _vistos = new Set();
+    const unicos = todos.filter(d => {
+      const k = d.return_sn || d.order_sn || JSON.stringify(d).slice(0, 60);
+      if (_vistos.has(k)) return false;
+      _vistos.add(k);
+      return true;
+    });
+
+    const dados = unicos.map(d => ({
       return_sn: d.return_sn || null,
       order_sn: d.order_sn || null,
       status: d.status || null,
