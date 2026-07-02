@@ -206,6 +206,85 @@ app.get('/:loja/oauth/callback-shopee', resolverLoja, async (req, res) => {
 // OPERACAO
 // =============================================================================
 
+// =============================================================================
+// INTERNO (v1.6): lista as DEVOLUCOES/RETURNS da loja pro sistema
+// GOOD Devolucoes casar a etiqueta bipada (tracking/return_sn/order_sn).
+// Protegida por header x-internal-key (= env INTERNAL_KEY).
+// Cache em memoria 10 min por loja. ?refresh=1 forca. ?bruto=1 devolve a
+// resposta crua da Shopee (1a pagina) pra depurar nomes de campos.
+// =============================================================================
+const _cacheDevolucoesLoja = {};
+
+app.get('/:loja/interno/devolucoes', resolverLoja, async (req, res) => {
+  const chaveRecebida = req.headers['x-internal-key'] || req.query.k || '';
+  if (!process.env.INTERNAL_KEY || chaveRecebida !== process.env.INTERNAL_KEY) {
+    return res.status(401).json({ ok: false, erro: 'chave interna invalida ou INTERNAL_KEY nao configurada' });
+  }
+  const loja = req.loja;
+  try {
+    const dias = Math.min(90, parseInt(req.query.dias, 10) || 60);
+    const ate = Math.floor(Date.now() / 1000);
+    const de = ate - dias * 86400;
+
+    // Modo debug: resposta crua da 1a pagina (ground truth dos campos)
+    if (req.query.bruto === '1') {
+      const rb = await shopee.shopeeApiCall(loja, '/api/v2/returns/get_return_list', 'GET', null,
+        `page_no=1&page_size=20&create_time_from=${de}&create_time_to=${ate}`);
+      return res.json({ ok: rb.ok, bruto: rb.data });
+    }
+
+    const cache = _cacheDevolucoesLoja[loja.key];
+    if (req.query.refresh !== '1' && cache && (Date.now() - cache.ts) < 10 * 60 * 1000) {
+      return res.json({ ok: true, cache: true, qtd: cache.dados.length, devolucoes: cache.dados });
+    }
+
+    const todos = [];
+    for (let pagina = 1; pagina <= 6; pagina++) {
+      if (pagina > 1) await new Promise(s => setTimeout(s, 300));
+      const r = await shopee.shopeeApiCall(loja, '/api/v2/returns/get_return_list', 'GET', null,
+        `page_no=${pagina}&page_size=100&create_time_from=${de}&create_time_to=${ate}`);
+      if (!r.ok) {
+        return res.status(502).json({ ok: false, erro: 'Shopee get_return_list: ' + JSON.stringify(r.data).slice(0, 400) });
+      }
+      const lista = r.data?.response?.return || [];
+      todos.push(...lista);
+      if (!r.data?.response?.more || lista.length === 0) break;
+    }
+
+    const dados = todos.map(d => ({
+      return_sn: d.return_sn || null,
+      order_sn: d.order_sn || null,
+      status: d.status || null,
+      reason: d.reason || null,
+      tracking_number: d.tracking_number || null,
+      create_time: d.create_time || null,
+      update_time: d.update_time || null,
+      itens: Array.isArray(d.item) ? d.item.map(i => ({
+        nome: i.name || null,
+        sku: i.item_sku || i.variation_sku || null,
+        qtd: i.amount || null,
+      })) : [],
+    }));
+
+    // Hidrata tracking faltante pelo get_return_detail (poucos casos)
+    const semTracking = dados.filter(x => !x.tracking_number && x.return_sn).slice(0, 30);
+    for (const item of semTracking) {
+      await new Promise(s => setTimeout(s, 250));
+      const rd = await shopee.shopeeApiCall(loja, '/api/v2/returns/get_return_detail', 'GET', null,
+        `return_sn=${encodeURIComponent(item.return_sn)}`);
+      const det = rd.ok ? rd.data?.response : null;
+      if (det && det.tracking_number) item.tracking_number = det.tracking_number;
+    }
+
+    _cacheDevolucoesLoja[loja.key] = { ts: Date.now(), dados };
+    console.log(`[interno/devolucoes][${loja.key}] ${dados.length} devolucoes (${dias}d)`);
+    res.json({ ok: true, cache: false, qtd: dados.length, devolucoes: dados });
+  } catch (e) {
+    console.error(`[interno/devolucoes][${loja.key}] erro:`, e.message);
+    res.status(500).json({ ok: false, erro: e.message || String(e) });
+  }
+});
+
 // Pendentes de todas as lojas (dry run)
 app.get('/pendentes', async (req, res) => {
   try {
