@@ -250,15 +250,26 @@ app.get('/:loja/interno/devolucoes', resolverLoja, async (req, res) => {
 
     const todos = [];
     let fimFatia = ate;
+    let basePagina = 0; // v1.6.4: get_return_list pagina do 0 em varias contas; detecta sozinho
+    let primeiraCrua = null; // amostra pro auto-diagnostico quando vier vazio
     while (fimFatia > de) {
       const iniFatia = Math.max(de, fimFatia - FATIA);
-      for (let pagina = 1; pagina <= 6; pagina++) {
+      for (let idx = 0; idx <= 6; idx++) {
+        const pagina = basePagina + idx;
         await new Promise(s => setTimeout(s, 250));
         const r = await shopee.shopeeApiCall(loja, '/api/v2/returns/get_return_list', 'GET', null,
           `page_no=${pagina}&page_size=100&create_time_from=${iniFatia}&create_time_to=${fimFatia}`);
         if (!r.ok) {
-          return res.status(502).json({ ok: false, erro: 'Shopee get_return_list: ' + JSON.stringify(r.data).slice(0, 400) });
+          const msg = JSON.stringify(r.data || {});
+          if (idx === 0 && basePagina === 0 && /page/i.test(msg)) {
+            // API desta conta e 1-based: ajusta e repete a fatia
+            basePagina = 1;
+            idx = -1;
+            continue;
+          }
+          return res.status(502).json({ ok: false, erro: 'Shopee get_return_list: ' + msg.slice(0, 400) });
         }
+        if (!primeiraCrua) primeiraCrua = r.data;
         const lista = r.data?.response?.return || [];
         todos.push(...lista);
         if (!r.data?.response?.more || lista.length === 0) break;
@@ -312,8 +323,14 @@ app.get('/:loja/interno/devolucoes', resolverLoja, async (req, res) => {
     }
 
     _cacheDevolucoesLoja[loja.key] = { ts: Date.now(), dados };
-    console.log(`[interno/devolucoes][${loja.key}] ${dados.length} devolucoes (${dias}d)`);
-    res.json({ ok: true, cache: false, qtd: dados.length, devolucoes: dados });
+    console.log(`[interno/devolucoes][${loja.key}] ${dados.length} devolucoes (${dias}d, base pag ${basePagina})`);
+    const resposta = { ok: true, cache: false, qtd: dados.length, devolucoes: dados };
+    if (dados.length === 0 && primeiraCrua) {
+      // Auto-diagnostico: mostra a resposta CRUA da Shopee pra revelar
+      // nomes de campos diferentes do esperado
+      resposta.debug_amostra_crua = primeiraCrua;
+    }
+    res.json(resposta);
   } catch (e) {
     console.error(`[interno/devolucoes][${loja.key}] erro:`, e.message);
     res.status(500).json({ ok: false, erro: e.message || String(e) });
