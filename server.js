@@ -15,6 +15,11 @@ const log = require('./modules/supabase-log');
 const { getConfigLoja, lojasValidas, lojasConfiguradas, SHOPEE_BASE } = require('./modules/lojas');
 
 const app = express();
+
+// ── Chave p/ rotas sensíveis (acessadas com ?k=CHAVE na URL) ─────────────────
+// Sem a env ADMIN_KEY configurada no Render, essas rotas ficam DESLIGADAS (404).
+const ADMIN_KEY = process.env.ADMIN_KEY || '';
+function adminOk(req) { return ADMIN_KEY && req.query.k === ADMIN_KEY; }
 app.use(express.json({ limit: '5mb' }));
 const PORT = process.env.PORT || 3000;
 
@@ -57,6 +62,7 @@ app.get('/health', (req, res) => res.json({ ok: true, ts: new Date().toISOString
 
 // DEBUG TEMPORARIO: mostra quais env vars o sistema esta lendo (sem expor valores).
 app.get('/debug-env', (req, res) => {
+  if (!adminOk(req)) return res.status(404).send('Not found'); // protegido: exige ?k=ADMIN_KEY
   const prefixos = ['AMB_SYNC', 'GIRASSOL_SYNC', 'GOOD_SYNC'];
   const sufixos = ['_BLING_CLIENT_ID', '_BLING_CLIENT_SECRET', '_SHOPEE_PARTNER_ID', '_SHOPEE_PARTNER_KEY'];
   const out = {};
@@ -75,6 +81,7 @@ app.get('/debug-env', (req, res) => {
 
 // Status agregado de todas as lojas
 app.get('/status', async (req, res) => {
+  if (!adminOk(req)) return res.status(404).send('Not found'); // protegido: exige ?k=ADMIN_KEY
   try {
     const out = { shopee_base_url: SHOPEE_BASE, lojas: {} };
     for (const key of lojasValidas()) {
@@ -113,6 +120,7 @@ app.get('/status', async (req, res) => {
 // =============================================================================
 
 app.post('/:loja/setup-bling', resolverLoja, async (req, res) => {
+  if (!adminOk(req)) return res.status(404).send('Not found'); // protegido: exige ?k=ADMIN_KEY
   try {
     const { code } = req.body;
     if (!code) return res.status(400).json({ erro: 'code obrigatorio no body' });
@@ -151,6 +159,7 @@ async function exchangeShopeeCode(loja, code, shopId) {
 }
 
 app.post('/:loja/setup-shopee', resolverLoja, async (req, res) => {
+  if (!adminOk(req)) return res.status(404).send('Not found'); // protegido: exige ?k=ADMIN_KEY
   try {
     const { code, shop_id } = req.body;
     if (!code || !shop_id) return res.status(400).json({ erro: 'code e shop_id obrigatorios' });
@@ -164,6 +173,7 @@ app.post('/:loja/setup-shopee', resolverLoja, async (req, res) => {
 // Gera o link de autorizacao Shopee (com sign) e redireciona o usuario pra la.
 // Basta acessar /amb/autorizar-shopee no navegador.
 app.get('/:loja/autorizar-shopee', resolverLoja, (req, res) => {
+  if (!adminOk(req)) return res.status(404).send('Not found'); // protegido: exige ?k=ADMIN_KEY
   try {
     const loja = req.loja;
     const partnerId = parseInt(loja.shopee.partnerId);
@@ -216,6 +226,7 @@ app.get('/:loja/oauth/callback-shopee', resolverLoja, async (req, res) => {
 const _cacheDevolucoesLoja = {};
 
 app.get('/:loja/interno/devolucoes', resolverLoja, async (req, res) => {
+  if (!adminOk(req)) return res.status(404).send('Not found'); // protegido: exige ?k=ADMIN_KEY
   const chaveRecebida = req.headers['x-internal-key'] || req.query.k || '';
   if (!process.env.INTERNAL_KEY || chaveRecebida !== process.env.INTERNAL_KEY) {
     return res.status(401).json({ ok: false, erro: 'chave interna invalida ou INTERNAL_KEY nao configurada' });
@@ -339,6 +350,7 @@ app.get('/:loja/interno/devolucoes', resolverLoja, async (req, res) => {
 
 // Pendentes de todas as lojas (dry run)
 app.get('/pendentes', async (req, res) => {
+  if (!adminOk(req)) return res.status(404).send('Not found'); // protegido: exige ?k=ADMIN_KEY
   try {
     const r = await engine.cicloTodasLojas({ dryRun: true });
     res.json(r);
@@ -349,6 +361,7 @@ app.get('/pendentes', async (req, res) => {
 
 // Sincroniza um pedido especifico de uma loja
 app.post('/:loja/sincronizar/:orderSn', resolverLoja, async (req, res) => {
+  if (!adminOk(req)) return res.status(404).send('Not found'); // protegido: exige ?k=ADMIN_KEY
   try {
     const r = await engine.sincronizarPedido(req.loja.key, req.params.orderSn);
     res.json(r);
@@ -359,6 +372,7 @@ app.post('/:loja/sincronizar/:orderSn', resolverLoja, async (req, res) => {
 
 // Roda ciclo completo de todas as lojas
 app.post('/sincronizar-ciclo', async (req, res) => {
+  if (!adminOk(req)) return res.status(404).send('Not found'); // protegido: exige ?k=ADMIN_KEY
   try {
     const dryRun = req.body?.dryRun === true;
     const r = await engine.cicloTodasLojas({ dryRun });
@@ -369,6 +383,7 @@ app.post('/sincronizar-ciclo', async (req, res) => {
 });
 
 app.get('/logs', async (req, res) => {
+  if (!adminOk(req)) return res.status(404).send('Not found'); // protegido: exige ?k=ADMIN_KEY
   try {
     const limit = parseInt(req.query.limit) || 50;
     const r = await log.ultimasExecucoes(limit);
