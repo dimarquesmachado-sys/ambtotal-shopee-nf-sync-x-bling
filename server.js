@@ -40,7 +40,7 @@ function resolverLoja(req, res, next) {
 app.get('/', (req, res) => {
   res.json({
     service: 'shopee-nf-sync',
-    version: '2.0.0-multiloja',
+    version: '2.0.1-multiloja (fix rota interna devolucoes)',
     status: 'rodando',
     shopee_base_url: SHOPEE_BASE,
     timezone: process.env.TZ || 'America/Sao_Paulo',
@@ -226,7 +226,10 @@ app.get('/:loja/oauth/callback-shopee', resolverLoja, async (req, res) => {
 const _cacheDevolucoesLoja = {};
 
 app.get('/:loja/interno/devolucoes', resolverLoja, async (req, res) => {
-  if (!adminOk(req)) return res.status(404).send('Not found'); // protegido: exige ?k=ADMIN_KEY
+  // v1.6.5 - esta rota e chamada MAQUINA-A-MAQUINA pelo GOOD-Devolucoes,
+  // que nao conhece o ADMIN_KEY deste servico. A protecao aqui e o
+  // INTERNAL_KEY (header x-internal-key) - forte e suficiente. O gate
+  // adminOk foi removido (estava barrando a comunicacao com 404/403).
   const chaveRecebida = req.headers['x-internal-key'] || req.query.k || '';
   if (!process.env.INTERNAL_KEY || chaveRecebida !== process.env.INTERNAL_KEY) {
     return res.status(401).json({ ok: false, erro: 'chave interna invalida ou INTERNAL_KEY nao configurada' });
