@@ -40,7 +40,7 @@ function resolverLoja(req, res, next) {
 app.get('/', (req, res) => {
   res.json({
     service: 'shopee-nf-sync',
-    version: '2.2.9-multiloja (amostra por idade)',
+    version: '2.3.0-multiloja (so DELIVERY_FAILED tem BR - otimizado)',
     status: 'rodando',
     shopee_base_url: SHOPEE_BASE,
     timezone: process.env.TZ || 'America/Sao_Paulo',
@@ -142,12 +142,13 @@ app.get('/:loja/interno/indice-status', resolverLoja, async (req, res) => {
   if (!idx) return res.json({ ok: true, VERSAO_CODIGO: '2.2.6', quente: false, motivo: 'indice ainda nao construido' });
   return res.json({
     ok: true,
-    VERSAO_CODIGO: '2.2.6', // se este numero nao aparecer, o Render esta na versao velha
+    VERSAO_CODIGO: '2.3.0',
     quente: true,
     idade_min: Math.round((Date.now() - idx.ts) / 60000),
     total_cancelados: idx.total,
+    com_remessa_real: idx.comRemessa,
+    nunca_postaram: idx.total - (idx.comRemessa || 0),
     com_tracking: idx.comTracking,
-    sem_tracking: idx.total - idx.comTracking,
     dias: idx.dias,
     duracao_construcao_seg: idx.duracaoSeg || null,
   });
@@ -337,8 +338,20 @@ async function construirIndiceTracking(loja, diasIdx = 60) {
     }
   }
   // 3) get_tracking_number e a FONTE PRIMARIA do BR pros cancelados.
-  // Roda pra TODOS os 121 (nenhum e filtrado por falta de detail).
-  const todosParaTrk = Object.values(detalhesPorSn).filter(Boolean);
+  // v2.3.0 - DIAGNOSTICO CONFIRMADO: cancelados tem 2 tipos de logistica:
+  //   LOGISTICS_DELIVERY_FAILED = pacote postado que falhou entrega -> TEM BR
+  //     (sao os "insucessos" reais que voltam pra bancada)
+  //   LOGISTICS_INVALID = cancelado antes de postar -> NUNCA teve pacote/BR
+  // Entao so consultamos get_tracking_number pros que tiveram remessa real -
+  // pular os INVALID economiza a maioria das chamadas (construcao bem mais
+  // rapida) sem perder nenhum pacote de verdade.
+  const teveRemessa = (ped) => {
+    const st = (ped.package_list || [])[0]?.logistics_status || '';
+    // aceita qualquer status que NAO seja INVALID (failed, delivered-then-
+    // returned, in transit reverso, etc) - so exclui o que nunca postou
+    return st && st !== 'LOGISTICS_INVALID';
+  };
+  const todosParaTrk = Object.values(detalhesPorSn).filter(p => p && teveRemessa(p));
   const buscaTrk = async (ped, tentativa = 1) => {
     try {
       const rt = await shopee.shopeeApiCall(loja, '/api/v2/logistics/get_tracking_number', 'GET', null,
@@ -367,10 +380,11 @@ async function construirIndiceTracking(loja, diasIdx = 60) {
       mapa[String(ped._tracking).toUpperCase().replace(/[^A-Z0-9]/g, '')] = ped;
     }
   }
-  const idx = { ts: Date.now(), mapa, total: sns.length, comTracking: Object.keys(mapa).length, dias: diasIdx, duracaoSeg: Math.round((Date.now() - _t0) / 1000), _hidratados: Object.values(detalhesPorSn).filter(p => p && p.item_list).length };
+  const comRemessa = Object.values(detalhesPorSn).filter(p => p && teveRemessa(p)).length;
+  const idx = { ts: Date.now(), mapa, total: sns.length, comTracking: Object.keys(mapa).length, dias: diasIdx, duracaoSeg: Math.round((Date.now() - _t0) / 1000), _hidratados: Object.values(detalhesPorSn).filter(p => p && p.item_list).length, comRemessa };
   if (!global._idxTrackingCancelados) global._idxTrackingCancelados = {};
   global._idxTrackingCancelados[loja.key] = idx;
-  console.log(`[indice-tracking][${loja.key}] ${idx.comTracking}/${idx.total} cancelados com rastreio (${diasIdx}d) em ${idx.duracaoSeg}s - detail hidratou ${idx._hidratados}`);
+  console.log(`[indice-tracking][${loja.key}] ${idx.comTracking}/${comRemessa} com rastreio (de ${sns.length} cancelados, ${sns.length - comRemessa} nunca postaram) em ${idx.duracaoSeg}s`);
   return idx;
 }
 
