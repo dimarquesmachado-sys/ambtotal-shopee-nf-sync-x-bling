@@ -40,7 +40,7 @@ function resolverLoja(req, res, next) {
 app.get('/', (req, res) => {
   res.json({
     service: 'shopee-nf-sync',
-    version: '2.0.1-multiloja (fix rota interna devolucoes)',
+    version: '2.0.4-multiloja (debug procurar+pedido)',
     status: 'rodando',
     shopee_base_url: SHOPEE_BASE,
     timezone: process.env.TZ || 'America/Sao_Paulo',
@@ -255,6 +255,54 @@ app.get('/:loja/interno/devolucoes', resolverLoja, async (req, res) => {
       const rd = await shopee.shopeeApiCall(loja, '/api/v2/returns/get_return_detail', 'GET', null,
         `return_sn=${encodeURIComponent(String(req.query.detalhe).trim())}`);
       return res.json({ ok: rd.ok, detalhe_bruto: rd.data });
+    }
+
+    // v1.6.6 - Modo debug: busca o PEDIDO original (ex: ?pedido=260623TX31XFMT)
+    // Serve pra "SPX Insucesso" (entrega falhada), que NAO aparece em
+    // get_return_list - o pacote volta pelo pedido original. Revela se
+    // get_order_detail acha e traz os itens.
+    if (req.query.pedido) {
+      const osn = String(req.query.pedido).trim();
+      const ro = await shopee.shopeeApiCall(loja, '/api/v2/order/get_order_detail', 'GET', null,
+        `order_sn_list=${encodeURIComponent(osn)}&response_optional_fields=item_list,recipient_address,total_amount,order_status`);
+      return res.json({ ok: ro.ok, pedido_bruto: ro.data });
+    }
+
+    // v1.6.6 - Modo debug: procura um codigo (order_sn/tracking) em TODA a
+    // lista crua de devolucoes, varrendo N dias com refresh, e diz se achou
+    // + em qual fatia. (ex: ?procurar=260623TX31XFMT&dias=180)
+    if (req.query.procurar) {
+      const alvo = String(req.query.procurar).trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+      const diasP = Math.min(180, parseInt(req.query.dias, 10) || 150);
+      const ateP = Math.floor(Date.now() / 1000);
+      const FATIA_P = 14 * 86400;
+      const achados = [];
+      let total = 0;
+      let fim = ateP;
+      let base = 0;
+      const norm = v => String(v || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+      while (fim > ateP - diasP * 86400) {
+        const ini = Math.max(ateP - diasP * 86400, fim - FATIA_P);
+        for (let idx = 0; idx <= 6; idx++) {
+          await new Promise(s => setTimeout(s, 250));
+          const r = await shopee.shopeeApiCall(loja, '/api/v2/returns/get_return_list', 'GET', null,
+            `page_no=${base + idx}&page_size=100&create_time_from=${ini}&create_time_to=${fim}`);
+          if (!r.ok) {
+            if (idx === 0 && base === 0 && /page/i.test(JSON.stringify(r.data || {}))) { base = 1; idx = -1; continue; }
+            break;
+          }
+          const lista = r.data?.response?.return || [];
+          total += lista.length;
+          for (const d of lista) {
+            if ([d.return_sn, d.order_sn, d.tracking_number].some(v => norm(v) === alvo || norm(v).includes(alvo))) {
+              achados.push({ return_sn: d.return_sn, order_sn: d.order_sn, tracking_number: d.tracking_number, status: d.status, fatia: new Date(ini * 1000).toISOString().slice(0, 10) + '..' + new Date(fim * 1000).toISOString().slice(0, 10) });
+            }
+          }
+          if (!r.data?.response?.more || lista.length === 0) break;
+        }
+        fim = ini - 1;
+      }
+      return res.json({ ok: true, alvo, dias: diasP, total_devolucoes_varridas: total, achados, encontrado: achados.length > 0 });
     }
 
     const cache = _cacheDevolucoesLoja[loja.key];
