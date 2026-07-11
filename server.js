@@ -40,7 +40,7 @@ function resolverLoja(req, res, next) {
 app.get('/', (req, res) => {
   res.json({
     service: 'shopee-nf-sync',
-    version: '2.2.6-multiloja (rebuild+amostra+versao)',
+    version: '2.2.7-multiloja (fix filter null - todos os 121)',
     status: 'rodando',
     shopee_base_url: SHOPEE_BASE,
     timezone: process.env.TZ || 'America/Sao_Paulo',
@@ -93,7 +93,7 @@ app.get('/:loja/interno/indice-status', resolverLoja, async (req, res) => {
   // tracking e mostra a resposta crua (revela se e rate limit).
   if (req.query.rebuild === '1') {
     const idxNovo = await construirIndiceTracking(req.loja, 60);
-    return res.json({ ok: true, rebuild: true, total_cancelados: idxNovo.total, com_tracking: idxNovo.comTracking, sem_tracking: idxNovo.total - idxNovo.comTracking, duracao_construcao_seg: idxNovo.duracaoSeg });
+    return res.json({ ok: true, rebuild: true, total_cancelados: idxNovo.total, com_tracking: idxNovo.comTracking, sem_tracking: idxNovo.total - idxNovo.comTracking, detail_hidratou: idxNovo._hidratados, duracao_construcao_seg: idxNovo.duracaoSeg });
   }
   const idx = (global._idxTrackingCancelados || {})[req.loja.key];
   if (req.query.amostra === '1' && idx) {
@@ -291,7 +291,11 @@ async function construirIndiceTracking(loja, diasIdx = 60) {
   // NOTA (v2.2.5): confirmado via JSON cru que pedidos CANCELADOS por
   // insucesso NAO trazem tracking no package_list (so package_number,
   // logistics_status...). O tracking vem SO do get_tracking_number.
+  // v2.2.7 - se o detail nao retornar um pedido, guardamos um placeholder
+  // {order_sn} mesmo assim, pra ele NAO sumir do passo 3 (o tracking vem
+  // do get_tracking_number por order_sn, independe do detail).
   const sns = Object.keys(detalhesPorSn);
+  for (const osn of sns) detalhesPorSn[osn] = { order_sn: osn, _tracking: null }; // garante objeto p/ todos
   for (let i = 0; i < sns.length; i += 50) {
     await new Promise(s => setTimeout(s, 300));
     const lote = sns.slice(i, i + 50);
@@ -299,12 +303,11 @@ async function construirIndiceTracking(loja, diasIdx = 60) {
       `order_sn_list=${encodeURIComponent(lote.join(','))}&response_optional_fields=item_list,order_status,package_list`);
     for (const ped of (rd.ok ? (rd.data?.response?.order_list || []) : [])) {
       ped._tracking = null; // preenchido no passo 3 (fonte real)
-      detalhesPorSn[ped.order_sn] = ped;
+      detalhesPorSn[ped.order_sn] = ped; // enriquece com item_list/status
     }
   }
   // 3) get_tracking_number e a FONTE PRIMARIA do BR pros cancelados.
-  // Roda pra TODOS (sem limite de 80), lotes de 5 em paralelo, com 1 retry
-  // quando a Shopee responde rate limit - pra nenhum pedido ficar de fora.
+  // Roda pra TODOS os 121 (nenhum e filtrado por falta de detail).
   const todosParaTrk = Object.values(detalhesPorSn).filter(Boolean);
   const buscaTrk = async (ped, tentativa = 1) => {
     try {
@@ -334,10 +337,10 @@ async function construirIndiceTracking(loja, diasIdx = 60) {
       mapa[String(ped._tracking).toUpperCase().replace(/[^A-Z0-9]/g, '')] = ped;
     }
   }
-  const idx = { ts: Date.now(), mapa, total: sns.length, comTracking: Object.keys(mapa).length, dias: diasIdx, duracaoSeg: Math.round((Date.now() - _t0) / 1000) };
+  const idx = { ts: Date.now(), mapa, total: sns.length, comTracking: Object.keys(mapa).length, dias: diasIdx, duracaoSeg: Math.round((Date.now() - _t0) / 1000), _hidratados: Object.values(detalhesPorSn).filter(p => p && p.item_list).length };
   if (!global._idxTrackingCancelados) global._idxTrackingCancelados = {};
   global._idxTrackingCancelados[loja.key] = idx;
-  console.log(`[indice-tracking][${loja.key}] ${idx.comTracking}/${idx.total} cancelados com rastreio (${diasIdx}d) em ${idx.duracaoSeg}s`);
+  console.log(`[indice-tracking][${loja.key}] ${idx.comTracking}/${idx.total} cancelados com rastreio (${diasIdx}d) em ${idx.duracaoSeg}s - detail hidratou ${idx._hidratados}`);
   return idx;
 }
 
