@@ -40,7 +40,7 @@ function resolverLoja(req, res, next) {
 app.get('/', (req, res) => {
   res.json({
     service: 'shopee-nf-sync',
-    version: '2.0.4-multiloja (debug procurar+pedido)',
+    version: '2.1.0-multiloja (busca por pedido cancelado)',
     status: 'rodando',
     shopee_base_url: SHOPEE_BASE,
     timezone: process.env.TZ || 'America/Sao_Paulo',
@@ -257,15 +257,44 @@ app.get('/:loja/interno/devolucoes', resolverLoja, async (req, res) => {
       return res.json({ ok: rd.ok, detalhe_bruto: rd.data });
     }
 
-    // v1.6.6 - Modo debug: busca o PEDIDO original (ex: ?pedido=260623TX31XFMT)
-    // Serve pra "SPX Insucesso" (entrega falhada), que NAO aparece em
-    // get_return_list - o pacote volta pelo pedido original. Revela se
-    // get_order_detail acha e traz os itens.
+    // v1.7.0 - Busca por PEDIDO (ex: ?pedido=260623TX31XFMT). Cobre o
+    // "SPX Insucesso": entrega falha -> Shopee CANCELA o pedido e reembolsa
+    // SEM criar return (comprovado: get_return_list nao traz; get_order_detail
+    // traz como CANCELLED). Se o pedido existe e esta cancelado (ou com
+    // itens cancelados/devolvidos), devolve no MESMO formato da lista de
+    // devolucoes - o Devoluces trata igual.
     if (req.query.pedido) {
       const osn = String(req.query.pedido).trim();
       const ro = await shopee.shopeeApiCall(loja, '/api/v2/order/get_order_detail', 'GET', null,
-        `order_sn_list=${encodeURIComponent(osn)}&response_optional_fields=item_list,recipient_address,total_amount,order_status`);
-      return res.json({ ok: ro.ok, pedido_bruto: ro.data });
+        `order_sn_list=${encodeURIComponent(osn)}&response_optional_fields=item_list,total_amount,order_status`);
+      if (req.query.bruto === '1') return res.json({ ok: ro.ok, pedido_bruto: ro.data });
+      const ped = ro.ok ? (ro.data?.response?.order_list || [])[0] : null;
+      if (!ped) return res.json({ ok: true, encontrado: false, motivo: 'pedido nao existe nesta loja' });
+      const cancelados = (ped.item_list || []).filter(i => (i.cancelled_qty || 0) > 0 || (i.returned_qty || 0) > 0);
+      const ehRetorno = ped.order_status === 'CANCELLED' || cancelados.length > 0;
+      if (!ehRetorno) {
+        return res.json({ ok: true, encontrado: false, motivo: `pedido existe mas status=${ped.order_status} sem itens cancelados/devolvidos - nao parece retorno` });
+      }
+      const itensBase = cancelados.length > 0 ? cancelados : (ped.item_list || []);
+      return res.json({
+        ok: true,
+        encontrado: true,
+        tipo: 'pedido_cancelado', // insucesso de entrega / cancelamento
+        devolucao: {
+          return_sn: null,
+          order_sn: ped.order_sn,
+          status: 'CANCELLED',
+          reason: 'insucesso_entrega_ou_cancelamento',
+          tracking_number: null,
+          create_time: ped.create_time || null,
+          update_time: ped.update_time || null,
+          itens: itensBase.map(i => ({
+            nome: i.item_name || null,
+            sku: i.item_sku || i.model_sku || null,
+            qtd: i.cancelled_qty || i.returned_qty || i.model_quantity_purchased || 1,
+          })),
+        },
+      });
     }
 
     // v1.6.6 - Modo debug: procura um codigo (order_sn/tracking) em TODA a
