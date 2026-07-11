@@ -40,7 +40,7 @@ function resolverLoja(req, res, next) {
 app.get('/', (req, res) => {
   res.json({
     service: 'shopee-nf-sync',
-    version: '2.2.2-multiloja (indice mais rapido + status)',
+    version: '2.2.3-multiloja (debug tracking cru)',
     status: 'rodando',
     shopee_base_url: SHOPEE_BASE,
     timezone: process.env.TZ || 'America/Sao_Paulo',
@@ -401,8 +401,21 @@ app.get('/:loja/interno/devolucoes', resolverLoja, async (req, res) => {
     if (req.query.pedido) {
       const osn = String(req.query.pedido).trim();
       const ro = await shopee.shopeeApiCall(loja, '/api/v2/order/get_order_detail', 'GET', null,
-        `order_sn_list=${encodeURIComponent(osn)}&response_optional_fields=item_list,total_amount,order_status`);
-      if (req.query.bruto === '1') return res.json({ ok: ro.ok, pedido_bruto: ro.data });
+        `order_sn_list=${encodeURIComponent(osn)}&response_optional_fields=item_list,total_amount,order_status,package_list`);
+      // v2.2.3 - ?bruto=1 mostra tudo + a resposta CRUA do get_tracking_number
+      // (revela ONDE a Shopee guarda o BR pros pedidos cancelados de insucesso)
+      if (req.query.bruto === '1') {
+        const rt = await shopee.shopeeApiCall(loja, '/api/v2/logistics/get_tracking_number', 'GET', null,
+          `order_sn=${encodeURIComponent(osn)}`);
+        const ped0 = ro.ok ? (ro.data?.response?.order_list || [])[0] : null;
+        return res.json({
+          ok: ro.ok,
+          order_status: ped0?.order_status,
+          package_list: ped0?.package_list || null,
+          tracking_number_no_detail: ped0?.tracking_number || null,
+          get_tracking_number_CRU: rt.ok ? rt.data : { erro: rt.data },
+        });
+      }
       const ped = ro.ok ? (ro.data?.response?.order_list || [])[0] : null;
       if (!ped) return res.json({ ok: true, encontrado: false, motivo: 'pedido nao existe nesta loja' });
       const dev = montarDevolucaoDePedido(ped);
