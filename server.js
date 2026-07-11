@@ -40,7 +40,7 @@ function resolverLoja(req, res, next) {
 app.get('/', (req, res) => {
   res.json({
     service: 'shopee-nf-sync',
-    version: '2.2.4-multiloja (fix ordem bruto+pedido)',
+    version: '2.2.5-multiloja (tracking p todos os cancelados)',
     status: 'rodando',
     shopee_base_url: SHOPEE_BASE,
     timezone: process.env.TZ || 'America/Sao_Paulo',
@@ -266,7 +266,10 @@ async function construirIndiceTracking(loja, diasIdx = 60) {
     }
     fimT = iniT - 1;
   }
-  // 2) detail em lotes de 50 (item_list + package_list p/ tracking)
+  // 2) detail em lotes de 50 - so pra montar itens (item_list/status).
+  // NOTA (v2.2.5): confirmado via JSON cru que pedidos CANCELADOS por
+  // insucesso NAO trazem tracking no package_list (so package_number,
+  // logistics_status...). O tracking vem SO do get_tracking_number.
   const sns = Object.keys(detalhesPorSn);
   for (let i = 0; i < sns.length; i += 50) {
     await new Promise(s => setTimeout(s, 300));
@@ -274,30 +277,34 @@ async function construirIndiceTracking(loja, diasIdx = 60) {
     const rd = await shopee.shopeeApiCall(loja, '/api/v2/order/get_order_detail', 'GET', null,
       `order_sn_list=${encodeURIComponent(lote.join(','))}&response_optional_fields=item_list,order_status,package_list`);
     for (const ped of (rd.ok ? (rd.data?.response?.order_list || []) : [])) {
-      const cand = [];
-      for (const p of (ped.package_list || [])) {
-        if (p.logistics_tracking_number) cand.push(p.logistics_tracking_number);
-        if (p.tracking_number) cand.push(p.tracking_number);
-      }
-      if (ped.tracking_number) cand.push(ped.tracking_number);
-      ped._tracking = cand.find(Boolean) || null;
+      ped._tracking = null; // preenchido no passo 3 (fonte real)
       detalhesPorSn[ped.order_sn] = ped;
     }
   }
-  // 3) fallback get_tracking_number pra quem ficou sem - EM LOTES paralelos
-  // (era serial: 60×250ms=15s. Agora lotes de 5 em paralelo = ~3s.)
-  const semTrk = Object.values(detalhesPorSn).filter(p => p && !p._tracking).slice(0, 80);
-  for (let i = 0; i < semTrk.length; i += 5) {
-    const lote = semTrk.slice(i, i + 5);
-    await Promise.all(lote.map(async (ped) => {
-      try {
-        const rt = await shopee.shopeeApiCall(loja, '/api/v2/logistics/get_tracking_number', 'GET', null,
-          `order_sn=${encodeURIComponent(ped.order_sn)}`);
-        const tn = rt.ok ? rt.data?.response?.tracking_number : null;
-        if (tn) ped._tracking = tn;
-      } catch (e) { /* ignora esse pedido */ }
-    }));
-    await new Promise(s => setTimeout(s, 200)); // respira entre lotes (rate limit)
+  // 3) get_tracking_number e a FONTE PRIMARIA do BR pros cancelados.
+  // Roda pra TODOS (sem limite de 80), lotes de 5 em paralelo, com 1 retry
+  // quando a Shopee responde rate limit - pra nenhum pedido ficar de fora.
+  const todosParaTrk = Object.values(detalhesPorSn).filter(Boolean);
+  const buscaTrk = async (ped, tentativa = 1) => {
+    try {
+      const rt = await shopee.shopeeApiCall(loja, '/api/v2/logistics/get_tracking_number', 'GET', null,
+        `order_sn=${encodeURIComponent(ped.order_sn)}`);
+      const tn = rt.ok ? rt.data?.response?.tracking_number : null;
+      if (tn) { ped._tracking = tn; return; }
+      // rate limit / erro transitorio -> 1 retry apos pausa
+      const msg = JSON.stringify(rt.data || {});
+      if (tentativa === 1 && /rate|limit|too many|busy/i.test(msg)) {
+        await new Promise(s => setTimeout(s, 1200));
+        return buscaTrk(ped, 2);
+      }
+    } catch (e) {
+      if (tentativa === 1) { await new Promise(s => setTimeout(s, 1200)); return buscaTrk(ped, 2); }
+    }
+  };
+  for (let i = 0; i < todosParaTrk.length; i += 5) {
+    const lote = todosParaTrk.slice(i, i + 5);
+    await Promise.all(lote.map(p => buscaTrk(p)));
+    await new Promise(s => setTimeout(s, 220)); // respira entre lotes (rate limit)
   }
   // 4) mapa tracking -> pedido
   const mapa = {};
