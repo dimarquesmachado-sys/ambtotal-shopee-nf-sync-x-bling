@@ -40,7 +40,7 @@ function resolverLoja(req, res, next) {
 app.get('/', (req, res) => {
   res.json({
     service: 'shopee-nf-sync',
-    version: '2.2.3-multiloja (debug tracking cru)',
+    version: '2.2.4-multiloja (fix ordem bruto+pedido)',
     status: 'rodando',
     shopee_base_url: SHOPEE_BASE,
     timezone: process.env.TZ || 'America/Sao_Paulo',
@@ -356,8 +356,10 @@ app.get('/:loja/interno/devolucoes', resolverLoja, async (req, res) => {
     const de = ate - dias * 86400;
     const FATIA = 14 * 86400; // 14d com folga (limite deles e 15)
 
-    // Modo debug: resposta crua da 1a pagina (ground truth dos campos)
-    if (req.query.bruto === '1') {
+    // Modo debug: resposta crua da 1a pagina (ground truth dos campos).
+    // v2.2.3 - so dispara se NAO houver ?pedido (senao o pedido&bruto cairia
+    // aqui por engano, retornando a lista em vez do detalhe do pedido).
+    if (req.query.bruto === '1' && !req.query.pedido) {
       const rb = await shopee.shopeeApiCall(loja, '/api/v2/returns/get_return_list', 'GET', null,
         `page_no=1&page_size=20&create_time_from=${ate - FATIA}&create_time_to=${ate}`);
       return res.json({ ok: rb.ok, bruto: rb.data });
