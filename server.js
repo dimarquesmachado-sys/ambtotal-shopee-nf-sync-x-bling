@@ -40,7 +40,7 @@ function resolverLoja(req, res, next) {
 app.get('/', (req, res) => {
   res.json({
     service: 'shopee-nf-sync',
-    version: '2.2.1-multiloja (indice pre-aquecido)',
+    version: '2.2.2-multiloja (indice mais rapido + status)',
     status: 'rodando',
     shopee_base_url: SHOPEE_BASE,
     timezone: process.env.TZ || 'America/Sao_Paulo',
@@ -80,6 +80,28 @@ app.get('/debug-env', (req, res) => {
 });
 
 // Status agregado de todas as lojas
+// v2.2.2 - status do indice tracking (diagnostico rapido, NAO reconstroi).
+// Mostra por loja: se ja esta quente, idade, total de cancelados e quantos
+// tem rastreio. Serve pra medir o gargalo do pre-aquecimento.
+app.get('/:loja/interno/indice-status', resolverLoja, (req, res) => {
+  const chave = req.headers['x-internal-key'] || req.query.k || '';
+  if (!process.env.INTERNAL_KEY || chave !== process.env.INTERNAL_KEY) {
+    return res.status(401).json({ ok: false, erro: 'chave interna invalida' });
+  }
+  const idx = (global._idxTrackingCancelados || {})[req.loja.key];
+  if (!idx) return res.json({ ok: true, quente: false, motivo: 'indice ainda nao construido (pre-aquecimento pode estar rodando ou nao comecou)' });
+  return res.json({
+    ok: true,
+    quente: true,
+    idade_min: Math.round((Date.now() - idx.ts) / 60000),
+    total_cancelados: idx.total,
+    com_tracking: idx.comTracking,
+    sem_tracking: idx.total - idx.comTracking,
+    dias: idx.dias,
+    duracao_construcao_seg: idx.duracaoSeg || null,
+  });
+});
+
 app.get('/status', async (req, res) => {
   if (!adminOk(req)) return res.status(404).send('Not found'); // protegido: exige ?k=ADMIN_KEY
   try {
@@ -223,6 +245,7 @@ app.get('/:loja/oauth/callback-shopee', resolverLoja, async (req, res) => {
 // estoquista sempre encontra indice quente (~2s).
 // =============================================================================
 async function construirIndiceTracking(loja, diasIdx = 60) {
+  const _t0 = Date.now();
   const agora = Math.floor(Date.now() / 1000);
   const FATIA_T = 14 * 86400;
   const detalhesPorSn = {};
@@ -261,14 +284,20 @@ async function construirIndiceTracking(loja, diasIdx = 60) {
       detalhesPorSn[ped.order_sn] = ped;
     }
   }
-  // 3) fallback get_tracking_number pra quem ficou sem
-  const semTrk = Object.values(detalhesPorSn).filter(p => p && !p._tracking).slice(0, 60);
-  for (const ped of semTrk) {
-    await new Promise(s => setTimeout(s, 250));
-    const rt = await shopee.shopeeApiCall(loja, '/api/v2/logistics/get_tracking_number', 'GET', null,
-      `order_sn=${encodeURIComponent(ped.order_sn)}`);
-    const tn = rt.ok ? rt.data?.response?.tracking_number : null;
-    if (tn) ped._tracking = tn;
+  // 3) fallback get_tracking_number pra quem ficou sem - EM LOTES paralelos
+  // (era serial: 60×250ms=15s. Agora lotes de 5 em paralelo = ~3s.)
+  const semTrk = Object.values(detalhesPorSn).filter(p => p && !p._tracking).slice(0, 80);
+  for (let i = 0; i < semTrk.length; i += 5) {
+    const lote = semTrk.slice(i, i + 5);
+    await Promise.all(lote.map(async (ped) => {
+      try {
+        const rt = await shopee.shopeeApiCall(loja, '/api/v2/logistics/get_tracking_number', 'GET', null,
+          `order_sn=${encodeURIComponent(ped.order_sn)}`);
+        const tn = rt.ok ? rt.data?.response?.tracking_number : null;
+        if (tn) ped._tracking = tn;
+      } catch (e) { /* ignora esse pedido */ }
+    }));
+    await new Promise(s => setTimeout(s, 200)); // respira entre lotes (rate limit)
   }
   // 4) mapa tracking -> pedido
   const mapa = {};
@@ -277,10 +306,10 @@ async function construirIndiceTracking(loja, diasIdx = 60) {
       mapa[String(ped._tracking).toUpperCase().replace(/[^A-Z0-9]/g, '')] = ped;
     }
   }
-  const idx = { ts: Date.now(), mapa, total: sns.length, comTracking: Object.keys(mapa).length, dias: diasIdx };
+  const idx = { ts: Date.now(), mapa, total: sns.length, comTracking: Object.keys(mapa).length, dias: diasIdx, duracaoSeg: Math.round((Date.now() - _t0) / 1000) };
   if (!global._idxTrackingCancelados) global._idxTrackingCancelados = {};
   global._idxTrackingCancelados[loja.key] = idx;
-  console.log(`[indice-tracking][${loja.key}] ${idx.comTracking}/${idx.total} cancelados com rastreio (${diasIdx}d)`);
+  console.log(`[indice-tracking][${loja.key}] ${idx.comTracking}/${idx.total} cancelados com rastreio (${diasIdx}d) em ${idx.duracaoSeg}s`);
   return idx;
 }
 
@@ -298,7 +327,7 @@ function _preAquecerIndices() {
     } catch (e) { /* loja invalida: ignora */ }
   }
 }
-setTimeout(_preAquecerIndices, 45 * 1000);
+setTimeout(_preAquecerIndices, 15 * 1000);
 setInterval(_preAquecerIndices, 25 * 60 * 1000);
 
 // =============================================================================
