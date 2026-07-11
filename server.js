@@ -40,7 +40,7 @@ function resolverLoja(req, res, next) {
 app.get('/', (req, res) => {
   res.json({
     service: 'shopee-nf-sync',
-    version: '2.2.0-multiloja (indice tracking->pedido)',
+    version: '2.2.1-multiloja (indice pre-aquecido)',
     status: 'rodando',
     shopee_base_url: SHOPEE_BASE,
     timezone: process.env.TZ || 'America/Sao_Paulo',
@@ -217,6 +217,91 @@ app.get('/:loja/oauth/callback-shopee', resolverLoja, async (req, res) => {
 // =============================================================================
 
 // =============================================================================
+// v2.2.1 - INDICE tracking->pedido CANCELADO (pro bip do BR de "insucesso").
+// Construcao pesada (lista + detail + get_tracking_number) roda AQUI, em
+// background - pre-aquecida no boot e renovada a cada 25min. O bipe do
+// estoquista sempre encontra indice quente (~2s).
+// =============================================================================
+async function construirIndiceTracking(loja, diasIdx = 60) {
+  const agora = Math.floor(Date.now() / 1000);
+  const FATIA_T = 14 * 86400;
+  const detalhesPorSn = {};
+  let fimT = agora;
+  // 1) lista pedidos CANCELLED em fatias de 14d
+  while (fimT > agora - diasIdx * 86400) {
+    const iniT = Math.max(agora - diasIdx * 86400, fimT - FATIA_T);
+    let cursor = '';
+    for (let pg = 0; pg < 6; pg++) {
+      await new Promise(s => setTimeout(s, 250));
+      const rl = await shopee.shopeeApiCall(loja, '/api/v2/order/get_order_list', 'GET', null,
+        `time_range_field=create_time&time_from=${iniT}&time_to=${fimT}&page_size=100&order_status=CANCELLED${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`);
+      if (!rl.ok) break;
+      for (const o of (rl.data?.response?.order_list || [])) detalhesPorSn[o.order_sn] = null;
+      if (!rl.data?.response?.more) break;
+      cursor = rl.data?.response?.next_cursor || '';
+      if (!cursor) break;
+    }
+    fimT = iniT - 1;
+  }
+  // 2) detail em lotes de 50 (item_list + package_list p/ tracking)
+  const sns = Object.keys(detalhesPorSn);
+  for (let i = 0; i < sns.length; i += 50) {
+    await new Promise(s => setTimeout(s, 300));
+    const lote = sns.slice(i, i + 50);
+    const rd = await shopee.shopeeApiCall(loja, '/api/v2/order/get_order_detail', 'GET', null,
+      `order_sn_list=${encodeURIComponent(lote.join(','))}&response_optional_fields=item_list,order_status,package_list`);
+    for (const ped of (rd.ok ? (rd.data?.response?.order_list || []) : [])) {
+      const cand = [];
+      for (const p of (ped.package_list || [])) {
+        if (p.logistics_tracking_number) cand.push(p.logistics_tracking_number);
+        if (p.tracking_number) cand.push(p.tracking_number);
+      }
+      if (ped.tracking_number) cand.push(ped.tracking_number);
+      ped._tracking = cand.find(Boolean) || null;
+      detalhesPorSn[ped.order_sn] = ped;
+    }
+  }
+  // 3) fallback get_tracking_number pra quem ficou sem
+  const semTrk = Object.values(detalhesPorSn).filter(p => p && !p._tracking).slice(0, 60);
+  for (const ped of semTrk) {
+    await new Promise(s => setTimeout(s, 250));
+    const rt = await shopee.shopeeApiCall(loja, '/api/v2/logistics/get_tracking_number', 'GET', null,
+      `order_sn=${encodeURIComponent(ped.order_sn)}`);
+    const tn = rt.ok ? rt.data?.response?.tracking_number : null;
+    if (tn) ped._tracking = tn;
+  }
+  // 4) mapa tracking -> pedido
+  const mapa = {};
+  for (const ped of Object.values(detalhesPorSn)) {
+    if (ped && ped._tracking) {
+      mapa[String(ped._tracking).toUpperCase().replace(/[^A-Z0-9]/g, '')] = ped;
+    }
+  }
+  const idx = { ts: Date.now(), mapa, total: sns.length, comTracking: Object.keys(mapa).length, dias: diasIdx };
+  if (!global._idxTrackingCancelados) global._idxTrackingCancelados = {};
+  global._idxTrackingCancelados[loja.key] = idx;
+  console.log(`[indice-tracking][${loja.key}] ${idx.comTracking}/${idx.total} cancelados com rastreio (${diasIdx}d)`);
+  return idx;
+}
+
+// Pre-aquecimento do indice: boot (45s) + a cada 25min. Lojas via env
+// TRACKING_PREWARM_LOJAS (padrao: good). Silencioso e a prova de falha.
+const _prewarmLojas = String(process.env.TRACKING_PREWARM_LOJAS || 'good')
+  .split(',').map(s => s.trim()).filter(Boolean);
+function _preAquecerIndices() {
+  for (const key of _prewarmLojas) {
+    try {
+      const loja = getConfigLoja(key);
+      if (!loja) continue;
+      construirIndiceTracking(loja, 60).catch(e =>
+        console.warn(`[indice-tracking][${key}] pre-aquecimento falhou:`, e.message || e));
+    } catch (e) { /* loja invalida: ignora */ }
+  }
+}
+setTimeout(_preAquecerIndices, 45 * 1000);
+setInterval(_preAquecerIndices, 25 * 60 * 1000);
+
+// =============================================================================
 // INTERNO (v1.6): lista as DEVOLUCOES/RETURNS da loja pro sistema
 // GOOD Devolucoes casar a etiqueta bipada (tracking/return_sn/order_sn).
 // Protegida por header x-internal-key (= env INTERNAL_KEY).
@@ -302,82 +387,23 @@ app.get('/:loja/interno/devolucoes', resolverLoja, async (req, res) => {
     // impresso na etiqueta de INSUCESSO e o rastreio do pedido original -
     // a Shopee nao tem busca reversa, entao construimos um INDICE dos
     // pedidos CANCELADOS recentes (tracking -> order_sn), cacheado 30min.
-    // Extracao do tracking: package_list do detail + fallback
-    // logistics/get_tracking_number (1 call so pra quem faltar).
+    // v2.2.1: o indice e PRE-AQUECIDO em background (boot + a cada 25min)
+    // - o estoquista nunca paga a construcao; bipe cai em indice quente.
     if (req.query.tracking) {
       const alvoTrk = String(req.query.tracking).trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
       if (!alvoTrk || alvoTrk.length < 8) {
         return res.json({ ok: true, encontrado: false, motivo: 'tracking invalido' });
       }
       const diasIdx = Math.min(90, parseInt(req.query.dias, 10) || 60);
-      if (!global._idxTrackingCancelados) global._idxTrackingCancelados = {};
-      let idx = global._idxTrackingCancelados[loja.key];
+      let idx = (global._idxTrackingCancelados || {})[loja.key];
       const idxVelho = !idx || (Date.now() - idx.ts) > 30 * 60 * 1000;
-
       if (idxVelho || req.query.refresh === '1') {
-        const agora = Math.floor(Date.now() / 1000);
-        const FATIA_T = 14 * 86400;
-        const detalhesPorSn = {};
-        let fimT = agora;
-        // 1) lista pedidos CANCELLED em fatias de 14d
-        while (fimT > agora - diasIdx * 86400) {
-          const iniT = Math.max(agora - diasIdx * 86400, fimT - FATIA_T);
-          let cursor = '';
-          for (let pg = 0; pg < 6; pg++) {
-            await new Promise(s => setTimeout(s, 250));
-            const rl = await shopee.shopeeApiCall(loja, '/api/v2/order/get_order_list', 'GET', null,
-              `time_range_field=create_time&time_from=${iniT}&time_to=${fimT}&page_size=100&order_status=CANCELLED${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`);
-            if (!rl.ok) break;
-            for (const o of (rl.data?.response?.order_list || [])) detalhesPorSn[o.order_sn] = null;
-            if (!rl.data?.response?.more) break;
-            cursor = rl.data?.response?.next_cursor || '';
-            if (!cursor) break;
-          }
-          fimT = iniT - 1;
-        }
-        // 2) detail em lotes de 50 (item_list + package_list p/ tracking)
-        const sns = Object.keys(detalhesPorSn);
-        for (let i = 0; i < sns.length; i += 50) {
-          await new Promise(s => setTimeout(s, 300));
-          const lote = sns.slice(i, i + 50);
-          const rd = await shopee.shopeeApiCall(loja, '/api/v2/order/get_order_detail', 'GET', null,
-            `order_sn_list=${encodeURIComponent(lote.join(','))}&response_optional_fields=item_list,order_status,package_list`);
-          for (const ped of (rd.ok ? (rd.data?.response?.order_list || []) : [])) {
-            // caca o tracking em todos os ninhos conhecidos
-            const cand = [];
-            for (const p of (ped.package_list || [])) {
-              if (p.logistics_tracking_number) cand.push(p.logistics_tracking_number);
-              if (p.tracking_number) cand.push(p.tracking_number);
-            }
-            if (ped.tracking_number) cand.push(ped.tracking_number);
-            ped._tracking = cand.find(Boolean) || null;
-            detalhesPorSn[ped.order_sn] = ped;
-          }
-        }
-        // 3) fallback get_tracking_number pra quem ficou sem
-        const semTrk = Object.values(detalhesPorSn).filter(p => p && !p._tracking).slice(0, 40);
-        for (const ped of semTrk) {
-          await new Promise(s => setTimeout(s, 250));
-          const rt = await shopee.shopeeApiCall(loja, '/api/v2/logistics/get_tracking_number', 'GET', null,
-            `order_sn=${encodeURIComponent(ped.order_sn)}`);
-          const tn = rt.ok ? rt.data?.response?.tracking_number : null;
-          if (tn) ped._tracking = tn;
-        }
-        // 4) monta o mapa tracking -> pedido
-        const mapa = {};
-        for (const ped of Object.values(detalhesPorSn)) {
-          if (ped && ped._tracking) {
-            mapa[String(ped._tracking).toUpperCase().replace(/[^A-Z0-9]/g, '')] = ped;
-          }
-        }
-        idx = { ts: Date.now(), mapa, total: sns.length, comTracking: Object.keys(mapa).length };
-        global._idxTrackingCancelados[loja.key] = idx;
-        console.log(`[interno/devolucoes][${loja.key}] indice tracking: ${idx.comTracking}/${idx.total} cancelados com rastreio (${diasIdx}d)`);
+        idx = await construirIndiceTracking(loja, diasIdx);
       }
 
       const ped = idx.mapa[alvoTrk];
       if (!ped) {
-        return res.json({ ok: true, encontrado: false, indice: { cancelados: idx.total, com_tracking: idx.comTracking, dias: diasIdx }, motivo: 'tracking nao esta entre os pedidos cancelados recentes' });
+        return res.json({ ok: true, encontrado: false, indice: { cancelados: idx.total, com_tracking: idx.comTracking, dias: idx.dias }, motivo: 'tracking nao esta entre os pedidos cancelados recentes' });
       }
       const dev = montarDevolucaoDePedido(ped);
       return res.json({ ok: true, encontrado: !!dev, tipo: 'pedido_cancelado_via_tracking', devolucao: dev });
