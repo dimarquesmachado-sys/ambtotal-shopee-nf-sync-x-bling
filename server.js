@@ -40,7 +40,7 @@ function resolverLoja(req, res, next) {
 app.get('/', (req, res) => {
   res.json({
     service: 'shopee-nf-sync',
-    version: '2.2.5-multiloja (tracking p todos os cancelados)',
+    version: '2.2.6-multiloja (rebuild+amostra+versao)',
     status: 'rodando',
     shopee_base_url: SHOPEE_BASE,
     timezone: process.env.TZ || 'America/Sao_Paulo',
@@ -83,15 +83,36 @@ app.get('/debug-env', (req, res) => {
 // v2.2.2 - status do indice tracking (diagnostico rapido, NAO reconstroi).
 // Mostra por loja: se ja esta quente, idade, total de cancelados e quantos
 // tem rastreio. Serve pra medir o gargalo do pre-aquecimento.
-app.get('/:loja/interno/indice-status', resolverLoja, (req, res) => {
+app.get('/:loja/interno/indice-status', resolverLoja, async (req, res) => {
   const chave = req.headers['x-internal-key'] || req.query.k || '';
   if (!process.env.INTERNAL_KEY || chave !== process.env.INTERNAL_KEY) {
     return res.status(401).json({ ok: false, erro: 'chave interna invalida' });
   }
+  // v2.2.6 - ?rebuild=1 forca reconstrucao AGORA (pra testar sem esperar
+  // o ciclo). ?amostra=1 testa get_tracking_number em 3 cancelados sem
+  // tracking e mostra a resposta crua (revela se e rate limit).
+  if (req.query.rebuild === '1') {
+    const idxNovo = await construirIndiceTracking(req.loja, 60);
+    return res.json({ ok: true, rebuild: true, total_cancelados: idxNovo.total, com_tracking: idxNovo.comTracking, sem_tracking: idxNovo.total - idxNovo.comTracking, duracao_construcao_seg: idxNovo.duracaoSeg });
+  }
   const idx = (global._idxTrackingCancelados || {})[req.loja.key];
-  if (!idx) return res.json({ ok: true, quente: false, motivo: 'indice ainda nao construido (pre-aquecimento pode estar rodando ou nao comecou)' });
+  if (req.query.amostra === '1' && idx) {
+    const semTrk = Object.values(idx.mapa).length; // ja mapeados
+    const testes = [];
+    const cancSemTrk = Object.keys(idx.mapa).length < idx.total;
+    // pega 3 order_sn quaisquer do proprio indice pra reconsultar
+    const amostraSns = Object.values(idx.mapa).slice(0, 3).map(p => p.order_sn);
+    for (const osn of amostraSns) {
+      const rt = await shopee.shopeeApiCall(req.loja, '/api/v2/logistics/get_tracking_number', 'GET', null,
+        `order_sn=${encodeURIComponent(osn)}`);
+      testes.push({ order_sn: osn, ok: rt.ok, resposta: rt.data });
+    }
+    return res.json({ ok: true, VERSAO_CODIGO: '2.2.6', teste_get_tracking_number: testes });
+  }
+  if (!idx) return res.json({ ok: true, VERSAO_CODIGO: '2.2.6', quente: false, motivo: 'indice ainda nao construido' });
   return res.json({
     ok: true,
+    VERSAO_CODIGO: '2.2.6', // se este numero nao aparecer, o Render esta na versao velha
     quente: true,
     idade_min: Math.round((Date.now() - idx.ts) / 60000),
     total_cancelados: idx.total,
