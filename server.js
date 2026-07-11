@@ -40,7 +40,7 @@ function resolverLoja(req, res, next) {
 app.get('/', (req, res) => {
   res.json({
     service: 'shopee-nf-sync',
-    version: '2.2.7-multiloja (fix filter null - todos os 121)',
+    version: '2.2.8-multiloja (amostra dos sem-tracking)',
     status: 'rodando',
     shopee_base_url: SHOPEE_BASE,
     timezone: process.env.TZ || 'America/Sao_Paulo',
@@ -97,17 +97,33 @@ app.get('/:loja/interno/indice-status', resolverLoja, async (req, res) => {
   }
   const idx = (global._idxTrackingCancelados || {})[req.loja.key];
   if (req.query.amostra === '1' && idx) {
-    const semTrk = Object.values(idx.mapa).length; // ja mapeados
+    // v2.2.8 - testa get_tracking_number nos pedidos SEM tracking (os que
+    // falharam), nao nos que ja funcionam. Revela o motivo real (vazio?
+    // erro? precisa package_number?). Reconstroi a lista de order_sn dos
+    // cancelados e separa quem NAO esta no mapa.
+    const noMapa = new Set(Object.values(idx.mapa).map(p => p.order_sn));
+    // pega alguns order_sn cancelados que NAO entraram no mapa
+    const agora = Math.floor(Date.now() / 1000);
+    const rl = await shopee.shopeeApiCall(req.loja, '/api/v2/order/get_order_list', 'GET', null,
+      `time_range_field=create_time&time_from=${agora - 30 * 86400}&time_to=${agora}&page_size=100&order_status=CANCELLED`);
+    const cancel = (rl.ok ? (rl.data?.response?.order_list || []) : []).map(o => o.order_sn);
+    const semTrk = cancel.filter(sn => !noMapa.has(sn)).slice(0, 4);
     const testes = [];
-    const cancSemTrk = Object.keys(idx.mapa).length < idx.total;
-    // pega 3 order_sn quaisquer do proprio indice pra reconsultar
-    const amostraSns = Object.values(idx.mapa).slice(0, 3).map(p => p.order_sn);
-    for (const osn of amostraSns) {
+    for (const osn of semTrk) {
       const rt = await shopee.shopeeApiCall(req.loja, '/api/v2/logistics/get_tracking_number', 'GET', null,
         `order_sn=${encodeURIComponent(osn)}`);
-      testes.push({ order_sn: osn, ok: rt.ok, resposta: rt.data });
+      // tambem tenta com o detail pra ver o package_list desse
+      const rd = await shopee.shopeeApiCall(req.loja, '/api/v2/order/get_order_detail', 'GET', null,
+        `order_sn_list=${encodeURIComponent(osn)}&response_optional_fields=order_status,package_list`);
+      const ped0 = rd.ok ? (rd.data?.response?.order_list || [])[0] : null;
+      testes.push({
+        order_sn: osn,
+        get_tracking_number: rt.data,
+        order_status: ped0?.order_status,
+        package_list: ped0?.package_list || null,
+      });
     }
-    return res.json({ ok: true, VERSAO_CODIGO: '2.2.6', teste_get_tracking_number: testes });
+    return res.json({ ok: true, VERSAO_CODIGO: '2.2.8', testando: 'pedidos SEM tracking no indice', total_cancel_recente: cancel.length, testes });
   }
   if (!idx) return res.json({ ok: true, VERSAO_CODIGO: '2.2.6', quente: false, motivo: 'indice ainda nao construido' });
   return res.json({
