@@ -40,7 +40,7 @@ function resolverLoja(req, res, next) {
 app.get('/', (req, res) => {
   res.json({
     service: 'shopee-nf-sync',
-    version: '2.1.0-multiloja (busca por pedido cancelado)',
+    version: '2.2.0-multiloja (indice tracking->pedido)',
     status: 'rodando',
     shopee_base_url: SHOPEE_BASE,
     timezone: process.env.TZ || 'America/Sao_Paulo',
@@ -263,6 +263,27 @@ app.get('/:loja/interno/devolucoes', resolverLoja, async (req, res) => {
     // traz como CANCELLED). Se o pedido existe e esta cancelado (ou com
     // itens cancelados/devolvidos), devolve no MESMO formato da lista de
     // devolucoes - o Devoluces trata igual.
+    const montarDevolucaoDePedido = (ped) => {
+      const cancelados = (ped.item_list || []).filter(i => (i.cancelled_qty || 0) > 0 || (i.returned_qty || 0) > 0);
+      const ehRetorno = ped.order_status === 'CANCELLED' || cancelados.length > 0;
+      if (!ehRetorno) return null;
+      const itensBase = cancelados.length > 0 ? cancelados : (ped.item_list || []);
+      return {
+        return_sn: null,
+        order_sn: ped.order_sn,
+        status: 'CANCELLED',
+        reason: 'insucesso_entrega_ou_cancelamento',
+        tracking_number: ped._tracking || null,
+        create_time: ped.create_time || null,
+        update_time: ped.update_time || null,
+        itens: itensBase.map(i => ({
+          nome: i.item_name || null,
+          sku: i.item_sku || i.model_sku || null,
+          qtd: i.cancelled_qty || i.returned_qty || i.model_quantity_purchased || 1,
+        })),
+      };
+    };
+
     if (req.query.pedido) {
       const osn = String(req.query.pedido).trim();
       const ro = await shopee.shopeeApiCall(loja, '/api/v2/order/get_order_detail', 'GET', null,
@@ -270,31 +291,96 @@ app.get('/:loja/interno/devolucoes', resolverLoja, async (req, res) => {
       if (req.query.bruto === '1') return res.json({ ok: ro.ok, pedido_bruto: ro.data });
       const ped = ro.ok ? (ro.data?.response?.order_list || [])[0] : null;
       if (!ped) return res.json({ ok: true, encontrado: false, motivo: 'pedido nao existe nesta loja' });
-      const cancelados = (ped.item_list || []).filter(i => (i.cancelled_qty || 0) > 0 || (i.returned_qty || 0) > 0);
-      const ehRetorno = ped.order_status === 'CANCELLED' || cancelados.length > 0;
-      if (!ehRetorno) {
+      const dev = montarDevolucaoDePedido(ped);
+      if (!dev) {
         return res.json({ ok: true, encontrado: false, motivo: `pedido existe mas status=${ped.order_status} sem itens cancelados/devolvidos - nao parece retorno` });
       }
-      const itensBase = cancelados.length > 0 ? cancelados : (ped.item_list || []);
-      return res.json({
-        ok: true,
-        encontrado: true,
-        tipo: 'pedido_cancelado', // insucesso de entrega / cancelamento
-        devolucao: {
-          return_sn: null,
-          order_sn: ped.order_sn,
-          status: 'CANCELLED',
-          reason: 'insucesso_entrega_ou_cancelamento',
-          tracking_number: null,
-          create_time: ped.create_time || null,
-          update_time: ped.update_time || null,
-          itens: itensBase.map(i => ({
-            nome: i.item_name || null,
-            sku: i.item_sku || i.model_sku || null,
-            qtd: i.cancelled_qty || i.returned_qty || i.model_quantity_purchased || 1,
-          })),
-        },
-      });
+      return res.json({ ok: true, encontrado: true, tipo: 'pedido_cancelado', devolucao: dev });
+    }
+
+    // v2.2.0 - Busca por TRACKING (ex: ?tracking=BR264193185445G). O BR
+    // impresso na etiqueta de INSUCESSO e o rastreio do pedido original -
+    // a Shopee nao tem busca reversa, entao construimos um INDICE dos
+    // pedidos CANCELADOS recentes (tracking -> order_sn), cacheado 30min.
+    // Extracao do tracking: package_list do detail + fallback
+    // logistics/get_tracking_number (1 call so pra quem faltar).
+    if (req.query.tracking) {
+      const alvoTrk = String(req.query.tracking).trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+      if (!alvoTrk || alvoTrk.length < 8) {
+        return res.json({ ok: true, encontrado: false, motivo: 'tracking invalido' });
+      }
+      const diasIdx = Math.min(90, parseInt(req.query.dias, 10) || 60);
+      if (!global._idxTrackingCancelados) global._idxTrackingCancelados = {};
+      let idx = global._idxTrackingCancelados[loja.key];
+      const idxVelho = !idx || (Date.now() - idx.ts) > 30 * 60 * 1000;
+
+      if (idxVelho || req.query.refresh === '1') {
+        const agora = Math.floor(Date.now() / 1000);
+        const FATIA_T = 14 * 86400;
+        const detalhesPorSn = {};
+        let fimT = agora;
+        // 1) lista pedidos CANCELLED em fatias de 14d
+        while (fimT > agora - diasIdx * 86400) {
+          const iniT = Math.max(agora - diasIdx * 86400, fimT - FATIA_T);
+          let cursor = '';
+          for (let pg = 0; pg < 6; pg++) {
+            await new Promise(s => setTimeout(s, 250));
+            const rl = await shopee.shopeeApiCall(loja, '/api/v2/order/get_order_list', 'GET', null,
+              `time_range_field=create_time&time_from=${iniT}&time_to=${fimT}&page_size=100&order_status=CANCELLED${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`);
+            if (!rl.ok) break;
+            for (const o of (rl.data?.response?.order_list || [])) detalhesPorSn[o.order_sn] = null;
+            if (!rl.data?.response?.more) break;
+            cursor = rl.data?.response?.next_cursor || '';
+            if (!cursor) break;
+          }
+          fimT = iniT - 1;
+        }
+        // 2) detail em lotes de 50 (item_list + package_list p/ tracking)
+        const sns = Object.keys(detalhesPorSn);
+        for (let i = 0; i < sns.length; i += 50) {
+          await new Promise(s => setTimeout(s, 300));
+          const lote = sns.slice(i, i + 50);
+          const rd = await shopee.shopeeApiCall(loja, '/api/v2/order/get_order_detail', 'GET', null,
+            `order_sn_list=${encodeURIComponent(lote.join(','))}&response_optional_fields=item_list,order_status,package_list`);
+          for (const ped of (rd.ok ? (rd.data?.response?.order_list || []) : [])) {
+            // caca o tracking em todos os ninhos conhecidos
+            const cand = [];
+            for (const p of (ped.package_list || [])) {
+              if (p.logistics_tracking_number) cand.push(p.logistics_tracking_number);
+              if (p.tracking_number) cand.push(p.tracking_number);
+            }
+            if (ped.tracking_number) cand.push(ped.tracking_number);
+            ped._tracking = cand.find(Boolean) || null;
+            detalhesPorSn[ped.order_sn] = ped;
+          }
+        }
+        // 3) fallback get_tracking_number pra quem ficou sem
+        const semTrk = Object.values(detalhesPorSn).filter(p => p && !p._tracking).slice(0, 40);
+        for (const ped of semTrk) {
+          await new Promise(s => setTimeout(s, 250));
+          const rt = await shopee.shopeeApiCall(loja, '/api/v2/logistics/get_tracking_number', 'GET', null,
+            `order_sn=${encodeURIComponent(ped.order_sn)}`);
+          const tn = rt.ok ? rt.data?.response?.tracking_number : null;
+          if (tn) ped._tracking = tn;
+        }
+        // 4) monta o mapa tracking -> pedido
+        const mapa = {};
+        for (const ped of Object.values(detalhesPorSn)) {
+          if (ped && ped._tracking) {
+            mapa[String(ped._tracking).toUpperCase().replace(/[^A-Z0-9]/g, '')] = ped;
+          }
+        }
+        idx = { ts: Date.now(), mapa, total: sns.length, comTracking: Object.keys(mapa).length };
+        global._idxTrackingCancelados[loja.key] = idx;
+        console.log(`[interno/devolucoes][${loja.key}] indice tracking: ${idx.comTracking}/${idx.total} cancelados com rastreio (${diasIdx}d)`);
+      }
+
+      const ped = idx.mapa[alvoTrk];
+      if (!ped) {
+        return res.json({ ok: true, encontrado: false, indice: { cancelados: idx.total, com_tracking: idx.comTracking, dias: diasIdx }, motivo: 'tracking nao esta entre os pedidos cancelados recentes' });
+      }
+      const dev = montarDevolucaoDePedido(ped);
+      return res.json({ ok: true, encontrado: !!dev, tipo: 'pedido_cancelado_via_tracking', devolucao: dev });
     }
 
     // v1.6.6 - Modo debug: procura um codigo (order_sn/tracking) em TODA a
