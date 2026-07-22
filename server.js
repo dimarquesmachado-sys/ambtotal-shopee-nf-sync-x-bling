@@ -40,7 +40,7 @@ function resolverLoja(req, res, next) {
 app.get('/', (req, res) => {
   res.json({
     service: 'shopee-nf-sync',
-    version: '2.3.0-multiloja (so DELIVERY_FAILED tem BR - otimizado)',
+    version: '2.4.0-multiloja (margem-pedidos: escrow + create_time p/ dashboard)',
     status: 'rodando',
     shopee_base_url: SHOPEE_BASE,
     timezone: process.env.TZ || 'America/Sao_Paulo',
@@ -413,6 +413,51 @@ setInterval(_preAquecerIndices, 25 * 60 * 1000);
 // resposta crua da Shopee (1a pagina) pra depurar nomes de campos.
 // =============================================================================
 const _cacheDevolucoesLoja = {};
+
+// v2.4.0 - MARGEM POR PEDIDO (maquina-a-maquina, INTERNAL_KEY): o dashboard da
+// Girassol (mover-pedidos) chama esta rota pra buscar, por order_sn:
+//   - create_time (hora REAL da venda) e order_status, via get_order_detail
+//   - tarifas REAIS (comissao + taxas), via get_escrow_detail (order_income)
+// Uso: GET /:loja/interno/margem-pedidos?k=INTERNAL_KEY&order_sns=A,B,C   (max 20)
+// Debug: &raw=1 devolve tambem o detalhe CRU (max 2 pedidos) - serve pra
+// descobrirmos o nome do campo do order_id interno do Seller Centre.
+app.get('/:loja/interno/margem-pedidos', resolverLoja, async (req, res) => {
+  const chaveM = req.headers['x-internal-key'] || req.query.k || '';
+  if (!process.env.INTERNAL_KEY || chaveM !== process.env.INTERNAL_KEY) {
+    return res.status(401).json({ ok: false, erro: 'chave interna invalida ou INTERNAL_KEY nao configurada' });
+  }
+  const raw = req.query.raw === '1';
+  let sns = String(req.query.order_sns || '').split(',').map(x => x.trim()).filter(Boolean);
+  if (!sns.length) return res.status(400).json({ ok: false, erro: 'passe ?order_sns=A,B,C' });
+  sns = sns.slice(0, raw ? 2 : 20);
+  try {
+    const detalhes = await shopee.buscarDetalhesPedidos(req.loja, sns);
+    const porSn = {};
+    for (const d of detalhes) { if (d && d.order_sn) porSn[d.order_sn] = d; }
+    const saida = [];
+    for (const sn of sns) {
+      const d = porSn[sn] || null;
+      const item = {
+        order_sn: sn,
+        achou_detalhe: !!d,
+        create_time: (d && d.create_time) || null,      // epoch segundos - hora REAL da venda
+        pay_time: (d && d.pay_time) || null,
+        order_status: (d && d.order_status) || null,
+        escrow: null, escrow_erro: null
+      };
+      if (raw && d) item.detalhe_cru = d;
+      try {
+        const esc = await shopee.escrowPedido(req.loja, sn);
+        item.escrow = (esc && esc.order_income) || esc;   // order_income = comissao/taxas/frete reais
+      } catch (e) { item.escrow_erro = String(e.message || e).slice(0, 200); }
+      saida.push(item);
+      await new Promise(r => setTimeout(r, 350));
+    }
+    res.json({ ok: true, loja: req.loja.key, total: saida.length, pedidos: saida });
+  } catch (e) {
+    res.status(500).json({ ok: false, erro: String(e.message || e).slice(0, 300) });
+  }
+});
 
 app.get('/:loja/interno/devolucoes', resolverLoja, async (req, res) => {
   // v1.6.5 - esta rota e chamada MAQUINA-A-MAQUINA pelo GOOD-Devolucoes,
