@@ -439,7 +439,26 @@ async function shipOrder(loja, orderSn) {
   return data;
 }
 
+// =============================================================================
+// ESCROW (tarifas REAIS por pedido) -- /api/v2/payment/get_escrow_detail
+// v2.4.0 - alimenta o dashboard de margem da Girassol (comissao + taxas de verdade)
+// =============================================================================
+
+async function escrowPedido(loja, orderSn) {
+  const apiPath = `/api/v2/payment/get_escrow_detail`;
+  const tokens = await getValidShopeeToken(loja);
+  const timestamp = Math.floor(Date.now() / 1000);
+  const partnerId = parseInt(loja.shopee.partnerId);
+  const sign = generateSign(loja, apiPath, timestamp, tokens.access_token, tokens.shop_id);
+  const url = `${SHOPEE_BASE}${apiPath}?partner_id=${partnerId}&timestamp=${timestamp}&access_token=${tokens.access_token}&shop_id=${tokens.shop_id}&sign=${sign}&order_sn=${encodeURIComponent(orderSn)}`;
+  const response = await fetchShopeeComRetry(url);
+  const data = await response.json();
+  if (data.error) throw new Error(`get_escrow_detail erro: ${data.error} ${data.message || ''}`);
+  return (data.response) || null;
+}
+
 module.exports = {
+  escrowPedido,
   refreshShopeeToken,
   getValidShopeeToken,
   loadShopeeTokens,
