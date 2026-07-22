@@ -451,8 +451,7 @@ async function escrowPedido(loja, orderSn) {
   const partnerId = parseInt(loja.shopee.partnerId);
   const sign = generateSign(loja, apiPath, timestamp, tokens.access_token, tokens.shop_id);
   const url = `${SHOPEE_BASE}${apiPath}?partner_id=${partnerId}&timestamp=${timestamp}&access_token=${tokens.access_token}&shop_id=${tokens.shop_id}&sign=${sign}&order_sn=${encodeURIComponent(orderSn)}`;
-  const response = await fetchShopeeComRetry(url);
-  const data = await response.json();
+  const data = await fetchShopeeComRetry(url);   // v2.4.3: o helper JA devolve o JSON parseado (nao e um Response)
   if (data.error) throw new Error(`get_escrow_detail erro: ${data.error} ${data.message || ''}`);
   return (data.response) || null;
 }
