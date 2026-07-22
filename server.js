@@ -40,7 +40,7 @@ function resolverLoja(req, res, next) {
 app.get('/', (req, res) => {
   res.json({
     service: 'shopee-nf-sync',
-    version: '2.4.0-multiloja (margem-pedidos: escrow + create_time p/ dashboard)',
+    version: '2.4.2-multiloja (interno/ping diagnostico de chave)',
     status: 'rodando',
     shopee_base_url: SHOPEE_BASE,
     timezone: process.env.TZ || 'America/Sao_Paulo',
@@ -414,6 +414,25 @@ setInterval(_preAquecerIndices, 25 * 60 * 1000);
 // =============================================================================
 const _cacheDevolucoesLoja = {};
 
+// v2.4.2 - DIAGNOSTICO DE CHAVE: nao revela segredo nenhum, so compara TAMANHOS.
+// Responde se a chave que chegou na URL bate com a INTERNAL_KEY ou a ADMIN_KEY
+// deste servico - mata na hora a duvida de "copiei errado / espaco / simbolo".
+// Uso: GET /interno/ping?k=CHAVE
+app.get('/interno/ping', (req, res) => {
+  const rec = String(req.query.k || '').trim();
+  const ik = String(process.env.INTERNAL_KEY || '').trim();
+  const ak = String(process.env.ADMIN_KEY || '').trim();
+  res.json({
+    ok: true,
+    chave_recebida_tamanho: rec.length,
+    internal_key_configurada: !!ik, internal_key_tamanho: ik.length,
+    admin_key_configurada: !!ak, admin_key_tamanho: ak.length,
+    bate_internal: !!ik && (rec === ik || rec.replace(/ /g, '+') === ik),
+    bate_admin: !!ak && (rec === ak || rec.replace(/ /g, '+') === ak),
+    dica: rec.length === 0 ? 'nenhuma chave chegou na URL - confira o ?k=' : null
+  });
+});
+
 // v2.4.0 - MARGEM POR PEDIDO (maquina-a-maquina, INTERNAL_KEY): o dashboard da
 // Girassol (mover-pedidos) chama esta rota pra buscar, por order_sn:
 //   - create_time (hora REAL da venda) e order_status, via get_order_detail
@@ -422,9 +441,13 @@ const _cacheDevolucoesLoja = {};
 // Debug: &raw=1 devolve tambem o detalhe CRU (max 2 pedidos) - serve pra
 // descobrirmos o nome do campo do order_id interno do Seller Centre.
 app.get('/:loja/interno/margem-pedidos', resolverLoja, async (req, res) => {
-  const chaveM = req.headers['x-internal-key'] || req.query.k || '';
-  if (!process.env.INTERNAL_KEY || chaveM !== process.env.INTERNAL_KEY) {
-    return res.status(401).json({ ok: false, erro: 'chave interna invalida ou INTERNAL_KEY nao configurada' });
+  // v2.4.1 - aceita INTERNAL_KEY ou ADMIN_KEY deste servico; tolera espaco copiado
+  // nas pontas e o classico '+' da chave que o navegador transforma em espaco no ?k=
+  const chaveM = String(req.headers['x-internal-key'] || req.query.k || '').trim();
+  const chavesOk = [process.env.INTERNAL_KEY, process.env.ADMIN_KEY].filter(Boolean).map(s => String(s).trim());
+  const bate = chavesOk.some(cv => chaveM === cv || chaveM.replace(/ /g, '+') === cv);
+  if (!chavesOk.length || !bate) {
+    return res.status(401).json({ ok: false, erro: 'chave invalida - use a INTERNAL_KEY ou a ADMIN_KEY DESTE servico (girassol-shopee-sync)' });
   }
   const raw = req.query.raw === '1';
   let sns = String(req.query.order_sns || '').split(',').map(x => x.trim()).filter(Boolean);
