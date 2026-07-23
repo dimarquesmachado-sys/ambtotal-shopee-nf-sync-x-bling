@@ -40,7 +40,7 @@ function resolverLoja(req, res, next) {
 app.get('/', (req, res) => {
   res.json({
     service: 'shopee-nf-sync',
-    version: '2.5.0-multiloja (etiqueta direto da Shopee p/ o checkout offline)',
+    version: '2.6.0-multiloja (etiqueta ZPL/ZIP/PDF direto da Shopee)',
     status: 'rodando',
     shopee_base_url: SHOPEE_BASE,
     timezone: process.env.TZ || 'America/Sao_Paulo',
@@ -439,6 +439,7 @@ app.get('/interno/ping', (req, res) => {
 // Uso normal: GET /:loja/interno/etiqueta?k=CHAVE&order_sn=XXXX      -> devolve o PDF
 // Diagnostico: &diag=1 -> devolve JSON com os passos (parameter/create/result/download)
 // Forcar tipo: &tipo=THERMAL_AIR_WAYBILL (padrao: o que a Shopee sugerir)
+// Modo rapido: &rapido=1 -> so tenta baixar o documento que ja existe (uso do ciclo, ~3s)
 app.get('/:loja/interno/etiqueta', resolverLoja, async (req, res) => {
   const chaveE = String(req.headers['x-internal-key'] || req.query.k || '').trim();
   const okE = [process.env.INTERNAL_KEY, process.env.ADMIN_KEY].filter(Boolean).map(s => String(s).trim());
@@ -448,11 +449,21 @@ app.get('/:loja/interno/etiqueta', resolverLoja, async (req, res) => {
   const sn = String(req.query.order_sn || '').trim();
   if (!sn) return res.status(400).json({ ok: false, erro: 'passe ?order_sn=XXXX' });
   try {
-    const r = await shopee.etiquetaPedido(req.loja, sn, req.query.tipo || null);
-    if (req.query.diag === '1') return res.json({ ok: true, loja: req.loja.key, order_sn: sn, tipo: r.tipo, bytes: r.pdf.length, passos: r.passos });
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="etiqueta-${sn}.pdf"`);
-    return res.end(r.pdf);
+    const r = await shopee.etiquetaPedido(req.loja, sn, req.query.tipo || null, req.query.rapido === '1');
+    if (req.query.diag === '1') {
+      return res.json({ ok: true, loja: req.loja.key, order_sn: sn, tipo: r.tipo, formato: r.formato, arquivo: r.arquivo || null, bytes: r.conteudo.length, origem: r.origem, amostra: r.formato === 'zpl' ? r.conteudo.toString('utf8').slice(0, 160) : null, passos: r.passos });
+    }
+    // v2.6.0: ZPL (o padrao da conta, impressao termica) vai como texto; PDF vai como PDF.
+    // O cabecalho X-Etiqueta-Formato diz ao checkout onde salvar (etiqueta.txt ZPL x etiqueta.pdf).
+    res.setHeader('X-Etiqueta-Formato', r.formato);
+    if (r.formato === 'pdf') {
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `inline; filename="etiqueta-${sn}.pdf"`);
+    } else {
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      res.setHeader('Content-Disposition', `inline; filename="etiqueta-${sn}.txt"`);
+    }
+    return res.end(r.conteudo);
   } catch (e) {
     return res.status(502).json({ ok: false, loja: req.loja.key, order_sn: sn, erro: String(e.message || e).slice(0, 300), passos: e.passos || null });
   }
