@@ -459,35 +459,61 @@ async function _pacotes(loja, orderSn) {
   } catch (e) { return []; }
 }
 
-// v2.6.0: a etiqueta pode vir em 3 formatos. Na conta do Diego (impressao TERMICA) a Shopee
-// devolve um ZIP com thermal_zpl_shipping_label.txt dentro -- ZPL, que e exatamente o que as
-// impressoras termicas do checkout ja imprimem nativo. Antes o codigo exigia %PDF e descartava.
-function _descompactaPrimeiro(buf) {
-  if (!buf || buf.length < 40) return null;
-  if (!(buf[0] === 0x50 && buf[1] === 0x4B && buf[2] === 0x03 && buf[3] === 0x04)) return null;   // "PK\x03\x04"
-  const metodo = buf.readUInt16LE(8);
-  const fnLen = buf.readUInt16LE(26);
-  const exLen = buf.readUInt16LE(28);
-  const nome = buf.slice(30, 30 + fnLen).toString('utf8');
-  const dados = buf.slice(30 + fnLen + exLen);
-  let out;
-  if (metodo === 0) out = dados;   // sem compressao
-  else out = zlib.inflateRawSync(dados, { finishFlush: zlib.constants.Z_SYNC_FLUSH });   // tolera o data descriptor no fim
+// v2.6.1: a etiqueta pode vir em 3 formatos. Na conta do Diego (impressao TERMICA) a Shopee
+// devolve um ZIP com thermal_zpl_shipping_label.txt dentro -- ZPL, que e o formato nativo das
+// impressoras do checkout. Dois cuidados que a v2.6.0 nao tinha:
+//  1) o ZIP vem em modo streaming (tamanhos zerados no header) -> le pelo DIRETORIO CENTRAL;
+//  2) o ZPL termico comeca com um bloco grande de grafico (~DG do logo) e o ^XA aparece bem depois
+//     -> procura os marcadores numa janela ampla, e confia tambem no NOME do arquivo.
+function _zipLeCentral(buf) {
+  let eocd = -1;
+  for (let i = buf.length - 22; i >= 0 && i > buf.length - 66000; i--) { if (buf.readUInt32LE(i) === 0x06054b50) { eocd = i; break; } }
+  if (eocd < 0) throw new Error('EOCD nao encontrado');
+  const cdOff = buf.readUInt32LE(eocd + 16);
+  if (buf.readUInt32LE(cdOff) !== 0x02014b50) throw new Error('diretorio central invalido');
+  const metodo = buf.readUInt16LE(cdOff + 10);
+  const tamComp = buf.readUInt32LE(cdOff + 20);
+  const fnLen = buf.readUInt16LE(cdOff + 28), exLen = buf.readUInt16LE(cdOff + 30);
+  const nome = buf.slice(cdOff + 46, cdOff + 46 + fnLen).toString('utf8');
+  const loc = buf.readUInt32LE(cdOff + 42);
+  const lfn = buf.readUInt16LE(loc + 26), lex = buf.readUInt16LE(loc + 28);
+  const ini = loc + 30 + lfn + lex;
+  const dados = tamComp > 0 ? buf.slice(ini, ini + tamComp) : buf.slice(ini);
+  const out = metodo === 0 ? dados : zlib.inflateRawSync(dados, { finishFlush: zlib.constants.Z_SYNC_FLUSH });
   return { nome, conteudo: out };
 }
 
+function _zipLeLocal(buf) {   // plano B: cabecalho local (funciona quando o central falha)
+  const metodo = buf.readUInt16LE(8);
+  const fnLen = buf.readUInt16LE(26), exLen = buf.readUInt16LE(28);
+  const nome = buf.slice(30, 30 + fnLen).toString('utf8');
+  const dados = buf.slice(30 + fnLen + exLen);
+  const out = metodo === 0 ? dados : zlib.inflateRawSync(dados, { finishFlush: zlib.constants.Z_SYNC_FLUSH });
+  return { nome, conteudo: out };
+}
+
+const _ehZpl = b => {
+  if (!b || b.length < 50) return false;
+  const t = b.slice(0, 8000).toString('latin1');   // janela ampla: o ^XA vem depois do grafico do logo
+  return t.indexOf('^XA') >= 0 || t.indexOf('~DG') >= 0 || t.indexOf('^FO') >= 0 || t.indexOf('^FD') >= 0;
+};
+const _ehPdfBuf = b => !!(b && b.length > 100 && b.slice(0, 4).toString('utf8') === '%PDF');
+
 function _extraiEtiqueta(buf) {
-  if (!buf || buf.length < 100) return null;
-  if (buf.slice(0, 4).toString('utf8') === '%PDF') return { formato: 'pdf', conteudo: buf };
-  if (buf.slice(0, 400).toString('utf8').indexOf('^XA') >= 0) return { formato: 'zpl', conteudo: buf };
-  try {
-    const z = _descompactaPrimeiro(buf);
-    if (z && z.conteudo && z.conteudo.length > 50) {
-      if (z.conteudo.slice(0, 4).toString('utf8') === '%PDF') return { formato: 'pdf', conteudo: z.conteudo, arquivo: z.nome };
-      if (z.conteudo.slice(0, 400).toString('utf8').indexOf('^XA') >= 0) return { formato: 'zpl', conteudo: z.conteudo, arquivo: z.nome };
-    }
-  } catch (e) { return null; }
-  return null;
+  if (!buf || buf.length < 100) return { erro: 'resposta vazia/curta' };
+  if (_ehPdfBuf(buf)) return { formato: 'pdf', conteudo: buf };
+  if (_ehZpl(buf)) return { formato: 'zpl', conteudo: buf };
+  if (buf[0] === 0x50 && buf[1] === 0x4B && buf[2] === 0x03 && buf[3] === 0x04) {   // ZIP "PK\x03\x04"
+    let z = null, erroZip = null;
+    try { z = _zipLeCentral(buf); } catch (e) { erroZip = 'central: ' + String(e.message || e).slice(0, 80); }
+    if (!z) { try { z = _zipLeLocal(buf); } catch (e) { erroZip = (erroZip || '') + ' | local: ' + String(e.message || e).slice(0, 80); } }
+    if (!z || !z.conteudo || z.conteudo.length < 50) return { erro: 'zip nao abriu (' + (erroZip || 'conteudo vazio') + ')' };
+    if (_ehPdfBuf(z.conteudo)) return { formato: 'pdf', conteudo: z.conteudo, arquivo: z.nome };
+    // o nome do arquivo ja entrega: thermal_zpl_shipping_label.txt
+    if (/zpl|\.txt$/i.test(z.nome) || _ehZpl(z.conteudo)) return { formato: 'zpl', conteudo: z.conteudo, arquivo: z.nome };
+    return { erro: 'zip aberto mas conteudo desconhecido (' + z.nome + ', ' + z.conteudo.length + ' bytes)', arquivo: z.nome };
+  }
+  return { erro: 'formato nao reconhecido' };
 }
 
 const _corta = o => { try { return JSON.stringify(o).slice(0, 420); } catch (e) { return String(o).slice(0, 200); } };
@@ -520,11 +546,14 @@ async function _docDownload(loja, orderSn, tipo, pkg) {
     body: JSON.stringify({ shipping_document_type: tipo, order_list: [item] })
   });
   const buf = await resp.buffer();
-  const etq = _extraiEtiqueta(buf);   // v2.6.0: aceita ZIP(ZPL), ZPL cru e PDF
+  const r = _extraiEtiqueta(buf);   // v2.6.1: aceita ZIP(ZPL), ZPL cru e PDF — e diz o motivo quando nao da
+  const ok = !!(r && r.formato && r.conteudo);
   return {
-    etiqueta: etq, http: resp.status, bytes: buf ? buf.length : 0,
-    formato: etq ? etq.formato : null, arquivo: etq ? (etq.arquivo || null) : null,
-    amostra: etq ? null : (buf ? buf.toString('utf8').slice(0, 200) : 'vazio')
+    etiqueta: ok ? r : null, http: resp.status, bytes: buf ? buf.length : 0,
+    formato: ok ? r.formato : null, arquivo: (r && r.arquivo) || null,
+    conteudo_bytes: ok ? r.conteudo.length : 0,
+    motivo: ok ? null : ((r && r.erro) || 'sem etiqueta'),
+    amostra: ok ? null : (buf ? buf.toString('utf8').slice(0, 200) : 'vazio')
   };
 }
 
@@ -568,7 +597,7 @@ async function etiquetaPedido(loja, orderSn, tipoForcado = null, rapido = false)
 
       // 3a) o documento ja existe? tenta baixar direto (na pratica e AQUI que resolve)
       const dl0 = await _docDownload(loja, orderSn, t, usarPkg);
-      passos.push({ passo: 'download-direto', tipo: rotulo, http: dl0.http, bytes: dl0.bytes, formato: dl0.formato, arquivo: dl0.arquivo, amostra: dl0.amostra });
+      passos.push({ passo: 'download-direto', tipo: rotulo, http: dl0.http, bytes: dl0.bytes, formato: dl0.formato, arquivo: dl0.arquivo, conteudo_bytes: dl0.conteudo_bytes, motivo: dl0.motivo, amostra: dl0.amostra });
       if (dl0.etiqueta) return { conteudo: dl0.etiqueta.conteudo, formato: dl0.etiqueta.formato, arquivo: dl0.arquivo, tipo: t, pkg: usarPkg, passos, origem: 'ja_existia' };
       if (rapido) continue;   // modo rapido (usado pelo ciclo): so tenta baixar o que ja existe, sem create/polling
 
@@ -588,7 +617,7 @@ async function etiquetaPedido(loja, orderSn, tipoForcado = null, rapido = false)
       passos.push({ passo: 'result', tipo: rotulo, pronto, ultimo_status: ultimo });
       if (pronto) {
         const dl = await _docDownload(loja, orderSn, t, usarPkg);
-        passos.push({ passo: 'download', tipo: rotulo, http: dl.http, bytes: dl.bytes, formato: dl.formato, arquivo: dl.arquivo, amostra: dl.amostra });
+        passos.push({ passo: 'download', tipo: rotulo, http: dl.http, bytes: dl.bytes, formato: dl.formato, arquivo: dl.arquivo, conteudo_bytes: dl.conteudo_bytes, motivo: dl.motivo, amostra: dl.amostra });
         if (dl.etiqueta) return { conteudo: dl.etiqueta.conteudo, formato: dl.etiqueta.formato, arquivo: dl.arquivo, tipo: t, pkg: usarPkg, passos, origem: 'gerada_agora' };
       }
     }
