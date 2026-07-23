@@ -447,43 +447,17 @@ async function shipOrder(loja, orderSn) {
 // pede a etiqueta aqui. Fluxo oficial: parameter -> create -> result(READY) -> download.
 // =============================================================================
 
-async function etiquetaPedido(loja, orderSn, tipoForcado = null) {
-  const passos = [];
-  let tipo = tipoForcado || null;
-
-  // 1) que tipo de documento este pedido aceita (a Shopee sugere o melhor)
+// helper: status do documento (READY / PROCESSING / FAILED / erro no topo)
+async function _docStatus(loja, orderSn, tipo) {
   try {
-    const par = await shopeeApiCall(loja, '/api/v2/logistics/get_shipping_document_parameter', 'POST', { order_list: [{ order_sn: orderSn }] });
-    const info = ((par.data && par.data.response && par.data.response.result_list) || [])[0] || {};
-    const selec = (info.selectable_shipping_document_type || []).map(x => (typeof x === 'string' ? x : x.shipping_document_type)).filter(Boolean);
-    passos.push({ passo: 'parameter', sugerido: info.suggest_shipping_document_type || null, selecionaveis: selec });
-    if (!tipo) tipo = info.suggest_shipping_document_type || selec[0] || null;
-  } catch (e) { passos.push({ passo: 'parameter', erro: String(e.message || e).slice(0, 160) }); }
-  if (!tipo) tipo = 'NORMAL_AIR_WAYBILL';
+    const rs = await shopeeApiCall(loja, '/api/v2/logistics/get_shipping_document_result', 'POST', { order_list: [{ order_sn: orderSn, shipping_document_type: tipo }] });
+    const it = (((rs.data && rs.data.response) || {}).result_list || [])[0] || {};
+    return { status: it.status || null, erro: (rs.data && rs.data.error) || null, motivo: it.fail_error || it.fail_message || null };
+  } catch (e) { return { status: null, erro: String(e.message || e).slice(0, 140) }; }
+}
 
-  // 2) manda gerar (se ja existir, a Shopee responde erro benigno e o result vem READY)
-  try {
-    const cr = await shopeeApiCall(loja, '/api/v2/logistics/create_shipping_document', 'POST', { order_list: [{ order_sn: orderSn, shipping_document_type: tipo }] });
-    passos.push({ passo: 'create', tipo, resposta: (cr.data && (cr.data.error || 'ok')) || 'ok' });
-  } catch (e) { passos.push({ passo: 'create', erro: String(e.message || e).slice(0, 160) }); }
-
-  // 3) espera ficar READY (a geracao e assincrona do lado deles)
-  let pronto = false, ultimoStatus = null;
-  for (let i = 0; i < 12 && !pronto; i++) {
-    await new Promise(r => setTimeout(r, 1500));
-    try {
-      const rs = await shopeeApiCall(loja, '/api/v2/logistics/get_shipping_document_result', 'POST', { order_list: [{ order_sn: orderSn, shipping_document_type: tipo }] });
-      const it = (((rs.data && rs.data.response) || {}).result_list || [])[0] || {};
-      ultimoStatus = it.status || (rs.data && rs.data.error) || null;
-      const st = String(ultimoStatus || '').toUpperCase();
-      if (st === 'READY') pronto = true;
-      else if (st === 'FAILED') { passos.push({ passo: 'result', status: st, motivo: it.fail_error || it.fail_message || null }); break; }
-    } catch (e) { ultimoStatus = String(e.message || e).slice(0, 120); }
-  }
-  passos.push({ passo: 'result', pronto, ultimo_status: ultimoStatus });
-  if (!pronto) { const err = new Error('etiqueta nao ficou pronta (status: ' + ultimoStatus + ')'); err.passos = passos; throw err; }
-
-  // 4) baixa o PDF -- resposta BINARIA, entao vai de fetch cru (o helper de retry parseia JSON)
+// helper: baixa o PDF (resposta BINARIA -> fetch cru; o helper de retry parseia JSON e estragaria)
+async function _docDownload(loja, orderSn, tipo) {
   const apiPath = '/api/v2/logistics/download_shipping_document';
   const tokens = await getValidShopeeToken(loja);
   const timestamp = Math.floor(Date.now() / 1000);
@@ -496,12 +470,67 @@ async function etiquetaPedido(loja, orderSn, tipoForcado = null) {
     body: JSON.stringify({ shipping_document_type: tipo, order_list: [{ order_sn: orderSn, shipping_document_type: tipo }] })
   });
   const buf = await resp.buffer();
-  passos.push({ passo: 'download', http: resp.status, bytes: buf ? buf.length : 0 });
-  if (!buf || buf.length < 500 || buf.slice(0, 4).toString('utf8') !== '%PDF') {
-    const err = new Error('download nao veio PDF: ' + (buf ? buf.toString('utf8').slice(0, 200) : 'vazio'));
-    err.passos = passos; throw err;
+  const ehPdf = !!(buf && buf.length > 500 && buf.slice(0, 4).toString('utf8') === '%PDF');
+  return { pdf: ehPdf ? buf : null, http: resp.status, bytes: buf ? buf.length : 0, amostra: ehPdf ? null : (buf ? buf.toString('utf8').slice(0, 180) : 'vazio') };
+}
+
+async function etiquetaPedido(loja, orderSn, tipoForcado = null) {
+  const passos = [];
+
+  // 1) tipos que ESTE pedido aceita (a Shopee sugere o melhor)
+  let sugerido = null, selec = [];
+  try {
+    const par = await shopeeApiCall(loja, '/api/v2/logistics/get_shipping_document_parameter', 'POST', { order_list: [{ order_sn: orderSn }] });
+    const info = ((par.data && par.data.response && par.data.response.result_list) || [])[0] || {};
+    sugerido = info.suggest_shipping_document_type || null;
+    selec = (info.selectable_shipping_document_type || []).map(x => (typeof x === 'string' ? x : x.shipping_document_type)).filter(Boolean);
+    passos.push({ passo: 'parameter', sugerido, selecionaveis: selec });
+  } catch (e) { passos.push({ passo: 'parameter', erro: String(e.message || e).slice(0, 160) }); }
+
+  const tipos = [...new Set([tipoForcado, sugerido, ...selec, 'NORMAL_AIR_WAYBILL', 'THERMAL_AIR_WAYBILL'].filter(Boolean))];
+
+  // 2) PRIMEIRO tenta baixar o que JA existe. A Shopee costuma gerar a etiqueta quando o envio e
+  //    organizado; ai ela RECUSA criar outra ("logistics.shipping_document_should_print_first")
+  //    ate a existente ser baixada. Entao: baixar antes, criar so se nao existir nada.
+  for (const t of tipos) {
+    const st = await _docStatus(loja, orderSn, t);
+    passos.push({ passo: 'result-previo', tipo: t, status: st.status, erro: st.erro });
+    const jaExiste = String(st.status || '').toUpperCase() === 'READY' || String(st.erro || '').indexOf('should_print_first') >= 0;
+    if (jaExiste || st.status) {
+      const dl = await _docDownload(loja, orderSn, t);
+      passos.push({ passo: 'download-previo', tipo: t, http: dl.http, bytes: dl.bytes, amostra: dl.amostra });
+      if (dl.pdf) return { pdf: dl.pdf, tipo: t, passos, origem: 'ja_existia' };
+    }
   }
-  return { pdf: buf, tipo, passos };
+
+  // 3) nada pronto -> manda gerar (sugerido primeiro) e espera ficar READY
+  for (const t of tipos.slice(0, 2)) {
+    try {
+      const cr = await shopeeApiCall(loja, '/api/v2/logistics/create_shipping_document', 'POST', { order_list: [{ order_sn: orderSn, shipping_document_type: t }] });
+      passos.push({ passo: 'create', tipo: t, resposta: (cr.data && (cr.data.error || 'ok')) || 'ok' });
+    } catch (e) { passos.push({ passo: 'create', tipo: t, erro: String(e.message || e).slice(0, 160) }); }
+
+    let pronto = false, ultimo = null;
+    for (let i = 0; i < 12 && !pronto; i++) {
+      await new Promise(r => setTimeout(r, 1500));
+      const st = await _docStatus(loja, orderSn, t);
+      ultimo = st.status || st.erro;
+      const su = String(st.status || '').toUpperCase();
+      if (su === 'READY') pronto = true;
+      else if (su === 'FAILED') { passos.push({ passo: 'result', tipo: t, status: su, motivo: st.motivo }); break; }
+      else if (String(st.erro || '').indexOf('should_print_first') >= 0) { pronto = true; }   // ja existe -> tenta baixar
+    }
+    passos.push({ passo: 'result', tipo: t, pronto, ultimo_status: ultimo });
+    if (pronto) {
+      const dl = await _docDownload(loja, orderSn, t);
+      passos.push({ passo: 'download', tipo: t, http: dl.http, bytes: dl.bytes, amostra: dl.amostra });
+      if (dl.pdf) return { pdf: dl.pdf, tipo: t, passos, origem: 'gerada_agora' };
+    }
+  }
+
+  const err = new Error('nao consegui a etiqueta na Shopee (veja os passos)');
+  err.passos = passos;
+  throw err;
 }
 
 // =============================================================================
