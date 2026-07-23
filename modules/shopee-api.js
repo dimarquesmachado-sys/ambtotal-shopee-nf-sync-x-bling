@@ -447,84 +447,113 @@ async function shipOrder(loja, orderSn) {
 // pede a etiqueta aqui. Fluxo oficial: parameter -> create -> result(READY) -> download.
 // =============================================================================
 
-// helper: status do documento (READY / PROCESSING / FAILED / erro no topo)
-async function _docStatus(loja, orderSn, tipo) {
+// helper: nº do(s) pacote(s) do pedido — a Shopee exige package_number em varios
+// fluxos de documento; sem ele o batch falha com erro generico.
+async function _pacotes(loja, orderSn) {
   try {
-    const rs = await shopeeApiCall(loja, '/api/v2/logistics/get_shipping_document_result', 'POST', { order_list: [{ order_sn: orderSn, shipping_document_type: tipo }] });
-    const it = (((rs.data && rs.data.response) || {}).result_list || [])[0] || {};
-    return { status: it.status || null, erro: (rs.data && rs.data.error) || null, motivo: it.fail_error || it.fail_message || null };
-  } catch (e) { return { status: null, erro: String(e.message || e).slice(0, 140) }; }
+    const r = await shopeeApiCall(loja, '/api/v2/order/get_order_detail', 'GET', null,
+      `order_sn_list=${encodeURIComponent(orderSn)}&response_optional_fields=package_list`);
+    const ol = (((r.data && r.data.response) || {}).order_list || [])[0] || {};
+    return (ol.package_list || []).map(p => p.package_number || p.packageNumber).filter(Boolean);
+  } catch (e) { return []; }
 }
 
-// helper: baixa o PDF (resposta BINARIA -> fetch cru; o helper de retry parseia JSON e estragaria)
-async function _docDownload(loja, orderSn, tipo) {
+const _corta = o => { try { return JSON.stringify(o).slice(0, 420); } catch (e) { return String(o).slice(0, 200); } };
+
+// helper: status do documento. Devolve tambem a resposta CRUA (o motivo real de um
+// batch_api_all_failed vem por item, dentro de result_list, nao no erro do topo).
+async function _docStatus(loja, orderSn, tipo, pkg) {
+  const item = { order_sn: orderSn, shipping_document_type: tipo };
+  if (pkg) item.package_number = pkg;
+  try {
+    const rs = await shopeeApiCall(loja, '/api/v2/logistics/get_shipping_document_result', 'POST', { order_list: [item] });
+    const it = (((rs.data && rs.data.response) || {}).result_list || [])[0] || {};
+    return { status: it.status || null, erro: (rs.data && rs.data.error) || null, cru: _corta(rs.data) };
+  } catch (e) { return { status: null, erro: String(e.message || e).slice(0, 140), cru: null }; }
+}
+
+// helper: baixa o PDF (resposta BINARIA -> fetch cru; o helper de retry parseia JSON)
+async function _docDownload(loja, orderSn, tipo, pkg) {
   const apiPath = '/api/v2/logistics/download_shipping_document';
   const tokens = await getValidShopeeToken(loja);
   const timestamp = Math.floor(Date.now() / 1000);
   const partnerId = parseInt(loja.shopee.partnerId);
   const sign = generateSign(loja, apiPath, timestamp, tokens.access_token, tokens.shop_id);
   const url = `${SHOPEE_BASE}${apiPath}?partner_id=${partnerId}&timestamp=${timestamp}&access_token=${tokens.access_token}&shop_id=${tokens.shop_id}&sign=${sign}`;
+  const item = { order_sn: orderSn };
+  if (pkg) item.package_number = pkg;
   const resp = await fetch(url, {
     method: 'POST', agent: httpsAgent, timeout: 60000,
     headers: { 'Content-Type': 'application/json', 'Connection': 'close' },
-    body: JSON.stringify({ shipping_document_type: tipo, order_list: [{ order_sn: orderSn, shipping_document_type: tipo }] })
+    body: JSON.stringify({ shipping_document_type: tipo, order_list: [item] })
   });
   const buf = await resp.buffer();
   const ehPdf = !!(buf && buf.length > 500 && buf.slice(0, 4).toString('utf8') === '%PDF');
-  return { pdf: ehPdf ? buf : null, http: resp.status, bytes: buf ? buf.length : 0, amostra: ehPdf ? null : (buf ? buf.toString('utf8').slice(0, 180) : 'vazio') };
+  return { pdf: ehPdf ? buf : null, http: resp.status, bytes: buf ? buf.length : 0, amostra: ehPdf ? null : (buf ? buf.toString('utf8').slice(0, 200) : 'vazio') };
+}
+
+// helper: manda gerar. Guarda a resposta CRUA — em batch_api_all_failed o motivo
+// real do pedido vem em result_list[].fail_error / fail_message.
+async function _docCreate(loja, orderSn, tipo, pkg) {
+  const item = { order_sn: orderSn, shipping_document_type: tipo };
+  if (pkg) item.package_number = pkg;
+  try {
+    const cr = await shopeeApiCall(loja, '/api/v2/logistics/create_shipping_document', 'POST', { order_list: [item] });
+    const lst = (((cr.data && cr.data.response) || {}).result_list || []);
+    const fail = (((cr.data && cr.data.response) || {}).fail_list || cr.data && cr.data.fail_list) || [];
+    return { erro: (cr.data && cr.data.error) || null, itens: _corta(lst.length ? lst : fail), cru: _corta(cr.data) };
+  } catch (e) { return { erro: String(e.message || e).slice(0, 140), cru: null }; }
 }
 
 async function etiquetaPedido(loja, orderSn, tipoForcado = null) {
   const passos = [];
 
-  // 1) tipos que ESTE pedido aceita (a Shopee sugere o melhor)
+  // 1) tipos aceitos por ESTE pedido
   let sugerido = null, selec = [];
   try {
     const par = await shopeeApiCall(loja, '/api/v2/logistics/get_shipping_document_parameter', 'POST', { order_list: [{ order_sn: orderSn }] });
     const info = ((par.data && par.data.response && par.data.response.result_list) || [])[0] || {};
     sugerido = info.suggest_shipping_document_type || null;
     selec = (info.selectable_shipping_document_type || []).map(x => (typeof x === 'string' ? x : x.shipping_document_type)).filter(Boolean);
-    passos.push({ passo: 'parameter', sugerido, selecionaveis: selec });
+    passos.push({ passo: 'parameter', sugerido, selecionaveis: selec, cru: _corta(par.data) });
   } catch (e) { passos.push({ passo: 'parameter', erro: String(e.message || e).slice(0, 160) }); }
 
-  const tipos = [...new Set([tipoForcado, sugerido, ...selec, 'NORMAL_AIR_WAYBILL', 'THERMAL_AIR_WAYBILL'].filter(Boolean))];
+  // 2) nº do pacote — varios fluxos de documento exigem, e sem ele a Shopee erra de forma generica
+  const pkgs = await _pacotes(loja, orderSn);
+  passos.push({ passo: 'pacotes', encontrados: pkgs });
+  const pkg = pkgs[0] || null;
 
-  // 2) PRIMEIRO tenta baixar o que JA existe. A Shopee costuma gerar a etiqueta quando o envio e
-  //    organizado; ai ela RECUSA criar outra ("logistics.shipping_document_should_print_first")
-  //    ate a existente ser baixada. Entao: baixar antes, criar so se nao existir nada.
+  const tipos = [...new Set([tipoForcado, sugerido, ...selec, 'THERMAL_AIR_WAYBILL', 'NORMAL_AIR_WAYBILL'].filter(Boolean))];
+
+  // 3) tenta o ciclo completo por tipo, COM e SEM package_number (a exigencia varia por canal logistico)
   for (const t of tipos) {
-    const st = await _docStatus(loja, orderSn, t);
-    passos.push({ passo: 'result-previo', tipo: t, status: st.status, erro: st.erro });
-    const jaExiste = String(st.status || '').toUpperCase() === 'READY' || String(st.erro || '').indexOf('should_print_first') >= 0;
-    if (jaExiste || st.status) {
-      const dl = await _docDownload(loja, orderSn, t);
-      passos.push({ passo: 'download-previo', tipo: t, http: dl.http, bytes: dl.bytes, amostra: dl.amostra });
-      if (dl.pdf) return { pdf: dl.pdf, tipo: t, passos, origem: 'ja_existia' };
-    }
-  }
+    for (const usarPkg of (pkg ? [pkg, null] : [null])) {
+      const rotulo = t + (usarPkg ? ' +pkg' : '');
 
-  // 3) nada pronto -> manda gerar (sugerido primeiro) e espera ficar READY
-  for (const t of tipos.slice(0, 2)) {
-    try {
-      const cr = await shopeeApiCall(loja, '/api/v2/logistics/create_shipping_document', 'POST', { order_list: [{ order_sn: orderSn, shipping_document_type: t }] });
-      passos.push({ passo: 'create', tipo: t, resposta: (cr.data && (cr.data.error || 'ok')) || 'ok' });
-    } catch (e) { passos.push({ passo: 'create', tipo: t, erro: String(e.message || e).slice(0, 160) }); }
+      // 3a) o documento ja existe? tenta baixar direto
+      const dl0 = await _docDownload(loja, orderSn, t, usarPkg);
+      passos.push({ passo: 'download-direto', tipo: rotulo, http: dl0.http, bytes: dl0.bytes, amostra: dl0.amostra });
+      if (dl0.pdf) return { pdf: dl0.pdf, tipo: t, pkg: usarPkg, passos, origem: 'ja_existia' };
 
-    let pronto = false, ultimo = null;
-    for (let i = 0; i < 12 && !pronto; i++) {
-      await new Promise(r => setTimeout(r, 1500));
-      const st = await _docStatus(loja, orderSn, t);
-      ultimo = st.status || st.erro;
-      const su = String(st.status || '').toUpperCase();
-      if (su === 'READY') pronto = true;
-      else if (su === 'FAILED') { passos.push({ passo: 'result', tipo: t, status: su, motivo: st.motivo }); break; }
-      else if (String(st.erro || '').indexOf('should_print_first') >= 0) { pronto = true; }   // ja existe -> tenta baixar
-    }
-    passos.push({ passo: 'result', tipo: t, pronto, ultimo_status: ultimo });
-    if (pronto) {
-      const dl = await _docDownload(loja, orderSn, t);
-      passos.push({ passo: 'download', tipo: t, http: dl.http, bytes: dl.bytes, amostra: dl.amostra });
-      if (dl.pdf) return { pdf: dl.pdf, tipo: t, passos, origem: 'gerada_agora' };
+      // 3b) manda gerar e espera
+      const cr = await _docCreate(loja, orderSn, t, usarPkg);
+      passos.push({ passo: 'create', tipo: rotulo, erro: cr.erro, itens: cr.itens, cru: cr.cru });
+
+      let pronto = false, ultimo = null;
+      for (let i = 0; i < 8 && !pronto; i++) {
+        await new Promise(r => setTimeout(r, 1500));
+        const st = await _docStatus(loja, orderSn, t, usarPkg);
+        ultimo = st.status || st.erro;
+        const su = String(st.status || '').toUpperCase();
+        if (su === 'READY') pronto = true;
+        else if (su === 'FAILED') { passos.push({ passo: 'result', tipo: rotulo, status: su, cru: st.cru }); break; }
+      }
+      passos.push({ passo: 'result', tipo: rotulo, pronto, ultimo_status: ultimo });
+      if (pronto) {
+        const dl = await _docDownload(loja, orderSn, t, usarPkg);
+        passos.push({ passo: 'download', tipo: rotulo, http: dl.http, bytes: dl.bytes, amostra: dl.amostra });
+        if (dl.pdf) return { pdf: dl.pdf, tipo: t, pkg: usarPkg, passos, origem: 'gerada_agora' };
+      }
     }
   }
 
