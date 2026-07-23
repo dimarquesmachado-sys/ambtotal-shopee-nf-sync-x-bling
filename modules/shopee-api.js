@@ -7,6 +7,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
+const zlib = require('zlib');   // v2.6.0: a Shopee entrega a etiqueta ZPL dentro de um ZIP
 const { SHOPEE_BASE } = require('./lojas');
 
 // Agent HTTPS que NAO reusa conexoes (keepAlive:false). O reuso de socket e a
@@ -458,6 +459,37 @@ async function _pacotes(loja, orderSn) {
   } catch (e) { return []; }
 }
 
+// v2.6.0: a etiqueta pode vir em 3 formatos. Na conta do Diego (impressao TERMICA) a Shopee
+// devolve um ZIP com thermal_zpl_shipping_label.txt dentro -- ZPL, que e exatamente o que as
+// impressoras termicas do checkout ja imprimem nativo. Antes o codigo exigia %PDF e descartava.
+function _descompactaPrimeiro(buf) {
+  if (!buf || buf.length < 40) return null;
+  if (!(buf[0] === 0x50 && buf[1] === 0x4B && buf[2] === 0x03 && buf[3] === 0x04)) return null;   // "PK\x03\x04"
+  const metodo = buf.readUInt16LE(8);
+  const fnLen = buf.readUInt16LE(26);
+  const exLen = buf.readUInt16LE(28);
+  const nome = buf.slice(30, 30 + fnLen).toString('utf8');
+  const dados = buf.slice(30 + fnLen + exLen);
+  let out;
+  if (metodo === 0) out = dados;   // sem compressao
+  else out = zlib.inflateRawSync(dados, { finishFlush: zlib.constants.Z_SYNC_FLUSH });   // tolera o data descriptor no fim
+  return { nome, conteudo: out };
+}
+
+function _extraiEtiqueta(buf) {
+  if (!buf || buf.length < 100) return null;
+  if (buf.slice(0, 4).toString('utf8') === '%PDF') return { formato: 'pdf', conteudo: buf };
+  if (buf.slice(0, 400).toString('utf8').indexOf('^XA') >= 0) return { formato: 'zpl', conteudo: buf };
+  try {
+    const z = _descompactaPrimeiro(buf);
+    if (z && z.conteudo && z.conteudo.length > 50) {
+      if (z.conteudo.slice(0, 4).toString('utf8') === '%PDF') return { formato: 'pdf', conteudo: z.conteudo, arquivo: z.nome };
+      if (z.conteudo.slice(0, 400).toString('utf8').indexOf('^XA') >= 0) return { formato: 'zpl', conteudo: z.conteudo, arquivo: z.nome };
+    }
+  } catch (e) { return null; }
+  return null;
+}
+
 const _corta = o => { try { return JSON.stringify(o).slice(0, 420); } catch (e) { return String(o).slice(0, 200); } };
 
 // helper: status do documento. Devolve tambem a resposta CRUA (o motivo real de um
@@ -488,8 +520,12 @@ async function _docDownload(loja, orderSn, tipo, pkg) {
     body: JSON.stringify({ shipping_document_type: tipo, order_list: [item] })
   });
   const buf = await resp.buffer();
-  const ehPdf = !!(buf && buf.length > 500 && buf.slice(0, 4).toString('utf8') === '%PDF');
-  return { pdf: ehPdf ? buf : null, http: resp.status, bytes: buf ? buf.length : 0, amostra: ehPdf ? null : (buf ? buf.toString('utf8').slice(0, 200) : 'vazio') };
+  const etq = _extraiEtiqueta(buf);   // v2.6.0: aceita ZIP(ZPL), ZPL cru e PDF
+  return {
+    etiqueta: etq, http: resp.status, bytes: buf ? buf.length : 0,
+    formato: etq ? etq.formato : null, arquivo: etq ? (etq.arquivo || null) : null,
+    amostra: etq ? null : (buf ? buf.toString('utf8').slice(0, 200) : 'vazio')
+  };
 }
 
 // helper: manda gerar. Guarda a resposta CRUA — em batch_api_all_failed o motivo
@@ -505,7 +541,7 @@ async function _docCreate(loja, orderSn, tipo, pkg) {
   } catch (e) { return { erro: String(e.message || e).slice(0, 140), cru: null }; }
 }
 
-async function etiquetaPedido(loja, orderSn, tipoForcado = null) {
+async function etiquetaPedido(loja, orderSn, tipoForcado = null, rapido = false) {
   const passos = [];
 
   // 1) tipos aceitos por ESTE pedido
@@ -530,10 +566,11 @@ async function etiquetaPedido(loja, orderSn, tipoForcado = null) {
     for (const usarPkg of (pkg ? [pkg, null] : [null])) {
       const rotulo = t + (usarPkg ? ' +pkg' : '');
 
-      // 3a) o documento ja existe? tenta baixar direto
+      // 3a) o documento ja existe? tenta baixar direto (na pratica e AQUI que resolve)
       const dl0 = await _docDownload(loja, orderSn, t, usarPkg);
-      passos.push({ passo: 'download-direto', tipo: rotulo, http: dl0.http, bytes: dl0.bytes, amostra: dl0.amostra });
-      if (dl0.pdf) return { pdf: dl0.pdf, tipo: t, pkg: usarPkg, passos, origem: 'ja_existia' };
+      passos.push({ passo: 'download-direto', tipo: rotulo, http: dl0.http, bytes: dl0.bytes, formato: dl0.formato, arquivo: dl0.arquivo, amostra: dl0.amostra });
+      if (dl0.etiqueta) return { conteudo: dl0.etiqueta.conteudo, formato: dl0.etiqueta.formato, arquivo: dl0.arquivo, tipo: t, pkg: usarPkg, passos, origem: 'ja_existia' };
+      if (rapido) continue;   // modo rapido (usado pelo ciclo): so tenta baixar o que ja existe, sem create/polling
 
       // 3b) manda gerar e espera
       const cr = await _docCreate(loja, orderSn, t, usarPkg);
@@ -551,8 +588,8 @@ async function etiquetaPedido(loja, orderSn, tipoForcado = null) {
       passos.push({ passo: 'result', tipo: rotulo, pronto, ultimo_status: ultimo });
       if (pronto) {
         const dl = await _docDownload(loja, orderSn, t, usarPkg);
-        passos.push({ passo: 'download', tipo: rotulo, http: dl.http, bytes: dl.bytes, amostra: dl.amostra });
-        if (dl.pdf) return { pdf: dl.pdf, tipo: t, pkg: usarPkg, passos, origem: 'gerada_agora' };
+        passos.push({ passo: 'download', tipo: rotulo, http: dl.http, bytes: dl.bytes, formato: dl.formato, arquivo: dl.arquivo, amostra: dl.amostra });
+        if (dl.etiqueta) return { conteudo: dl.etiqueta.conteudo, formato: dl.etiqueta.formato, arquivo: dl.arquivo, tipo: t, pkg: usarPkg, passos, origem: 'gerada_agora' };
       }
     }
   }
