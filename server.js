@@ -476,6 +476,58 @@ app.get('/:loja/interno/etiqueta', resolverLoja, async (req, res) => {
 // Uso: GET /:loja/interno/margem-pedidos?k=INTERNAL_KEY&order_sns=A,B,C   (max 20)
 // Debug: &raw=1 devolve tambem o detalhe CRU (max 2 pedidos) - serve pra
 // descobrirmos o nome do campo do order_id interno do Seller Centre.
+// =============================================================================
+// SONDA FBS (temporária, diagnóstico) — descobrir como puxar o XML da NF-e que
+// a SHOPEE emite no Full (FBS), em nome do seller, pra importar no Bling.
+// Mesmo desenho do Magalu. Não constrói nada: só chama os endpoints do fluxo
+// de 2 etapas (generate → result) e mostra o retorno CRU, pra ver o formato
+// real, se o app tem acesso (whitelist) e o fluxo de status.
+// Uso: GET /:loja/interno/sonda-fbs?k=ADMIN_KEY&order_sn=XXXX[&task_id=YYY]
+// =============================================================================
+app.get('/:loja/interno/sonda-fbs', resolverLoja, async (req, res) => {
+  const chave = String(req.headers['x-internal-key'] || req.query.k || '').trim();
+  const chavesOk = [process.env.INTERNAL_KEY, process.env.ADMIN_KEY].filter(Boolean).map(s => String(s).trim());
+  const bate = chavesOk.some(cv => chave === cv || chave.replace(/ /g, '+') === cv);
+  if (!chavesOk.length || !bate) {
+    return res.status(401).json({ ok: false, erro: 'chave invalida - use a INTERNAL_KEY ou a ADMIN_KEY DESTE servico' });
+  }
+
+  const orderSn = String(req.query.order_sn || '').trim();
+  const taskId  = String(req.query.task_id || '').trim();
+  const out = { ok: true, versao: 'sonda-fbs v1', loja: req.loja.key, order_sn: orderSn || null, task_id: taskId || null, testes: [] };
+
+  // helper: chama um apiPath com extraQuery e captura o retorno cru (ou o erro)
+  async function tenta(rotulo, apiPath, method, extraQuery, body) {
+    const reg = { rotulo, apiPath, method, extraQuery: extraQuery || null };
+    try {
+      const r = await shopee.shopeeApiCall(req.loja, apiPath, method || 'GET', body || null, extraQuery || null);
+      reg.http_ok = r.ok;
+      reg.error = (r.data && r.data.error) || null;       // a Shopee põe o código de erro aqui
+      reg.message = (r.data && (r.data.message || r.data.msg)) || null;
+      reg.retorno = r.data;                                // o corpo cru inteiro
+    } catch (e) { reg.excecao = String(e.message || e).slice(0, 300); }
+    out.testes.push(reg);
+    await new Promise(r => setTimeout(r, 400));
+  }
+
+  // ETAPA 1 — gerar a tarefa do documento FBS. Tento algumas grafias de path e
+  // de parâmetro, porque a doc às vezes diverge do que a API aceita.
+  if (!taskId) {
+    await tenta('gen A: /api/v2/order/generate_fbs_invoices (order_sn_list body)', '/api/v2/order/generate_fbs_invoices', 'POST', null, { order_sn_list: orderSn ? [orderSn] : [] });
+    await tenta('gen B: /api/v2/fbs/generate_fbs_invoices (order_sn_list body)', '/api/v2/fbs/generate_fbs_invoices', 'POST', null, { order_sn_list: orderSn ? [orderSn] : [] });
+    if (orderSn) await tenta('gen C: /api/v2/order/generate_fbs_invoices (order_sn query)', '/api/v2/order/generate_fbs_invoices', 'POST', `order_sn=${encodeURIComponent(orderSn)}`, null);
+  }
+
+  // ETAPA 2 — checar o resultado/status da tarefa. Se já houver task_id, checa direto.
+  await tenta('res A: /api/v2/order/get_fbs_invoices_result', '/api/v2/order/get_fbs_invoices_result', 'GET',
+    taskId ? `request_id=${encodeURIComponent(taskId)}` : (orderSn ? `order_sn=${encodeURIComponent(orderSn)}` : null), null);
+  await tenta('res B: /api/v2/fbs/get_fbs_invoices_result', '/api/v2/fbs/get_fbs_invoices_result', 'GET',
+    taskId ? `request_id=${encodeURIComponent(taskId)}` : (orderSn ? `order_sn=${encodeURIComponent(orderSn)}` : null), null);
+
+  out.como_ler = 'Olhe cada teste: se "error" vier vazio/null e "retorno" tiver dados, aquele path/parametro e o certo. Se "error" disser no_permission/whitelist, o app precisa de liberacao da Shopee pra esse endpoint. Se disser param invalido, o nome do parametro e outro.';
+  res.json(out);
+});
+
 app.get('/:loja/interno/margem-pedidos', resolverLoja, async (req, res) => {
   // v2.4.1 - aceita INTERNAL_KEY ou ADMIN_KEY deste servico; tolera espaco copiado
   // nas pontas e o classico '+' da chave que o navegador transforma em espaco no ?k=
