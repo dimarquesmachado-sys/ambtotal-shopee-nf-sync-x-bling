@@ -174,6 +174,7 @@ function gravarImportadas(lojaKey, reg) {
 // contagem. A extensão baixa o ZIP de "novas" e sobe no Bling.
 async function rotina(loja, opts = {}) {
   ensureDir(NF_DIR);
+  try { limpar(loja.key); } catch (e) {}   // remove ZIPs antigos com timestamp
   const end = ymdSP();
   const dias = Math.max(1, Number(opts.dias || NF_DIAS));
   const start = ymdSP(new Date(Date.now() - (dias - 1) * 864e5));
@@ -208,17 +209,17 @@ async function rotina(loja, opts = {}) {
   const amostra = sep.saida[0] || sep.entrada[0] || sep.indefinido[0];
   if (amostra) emitente = nfEmitente(amostra.dados);
 
-  // grava os ZIPs em disco (saída e entrada separados — importam em lotes
-  // diferentes no Bling: o campo Tipo muda)
-  const carimbo = ymdRotulo(end) + '-' + new Date().toTimeString().slice(0, 5).replace(':', '');
+  // grava os ZIPs em disco (saída e entrada separados). NOME FIXO por tipo
+  // (sem timestamp): cada busca SOBRESCREVE o anterior em vez de acumular
+  // dezenas de ZIPs. A extensão lê sempre o mais recente por estadoAtual().
   const escrito = {};
   if (novasSaida.length) {
-    const nome = loja.key + '-saida-' + carimbo + '.zip';
+    const nome = loja.key + '-saida-atual.zip';
     fs.writeFileSync(path.join(NF_DIR, nome), montarZip(novasSaida));
     escrito.saida = { nome, qtd: novasSaida.length };
   }
   if (novasEntrada.length) {
-    const nome = loja.key + '-entrada-' + carimbo + '.zip';
+    const nome = loja.key + '-entrada-atual.zip';
     fs.writeFileSync(path.join(NF_DIR, nome), montarZip(novasEntrada));
     escrito.entrada = { nome, qtd: novasEntrada.length };
   }
@@ -264,18 +265,58 @@ function chavesDoZip(nomeArquivo) {
 
 function caminhoZip(nomeArquivo) { return path.join(NF_DIR, nomeArquivo); }
 
-// ── Limpeza: mantém os NF_MANTER mais novos por loja ──
+// ── Limpeza: agora os ZIPs têm nome fixo (-saida-atual, -entrada-atual).
+// Remove qualquer ZIP ANTIGO com timestamp no nome (padrão -saida-DATA-HORA)
+// que tenha sobrado da versão anterior, pra o estadoAtual não lê-los.
 function limpar(lojaKey) {
   let nomes = [];
   try { nomes = fs.readdirSync(NF_DIR); } catch (e) { return; }
-  const meus = nomes.filter(n => n.startsWith(lojaKey + '-') && /\.zip$/.test(n))
+  // apaga os do padrão antigo com data: lojaKey-(saida|entrada)-AAAA-MM-DD-HHMM.zip
+  const padraoAntigo = new RegExp('^' + lojaKey + '-(saida|entrada)-\\d{4}-\\d{2}-\\d{2}-\\d{3,4}\\.zip$');
+  nomes.filter(n => padraoAntigo.test(n)).forEach(n => { try { fs.unlinkSync(path.join(NF_DIR, n)); } catch (e) {} });
+}
+
+// ── Lê o ZIP mais recente em disco e conta as NOVAS (sem buscar na Shopee) ──
+// É isto que a extensão consome: não gera nada, só olha o que o cron/painel
+// já baixou e diz quantas notas ali dentro ainda não foram importadas.
+function estadoAtual(loja) {
+  let nomes = [];
+  try { nomes = fs.readdirSync(NF_DIR); } catch (e) {}
+  const meus = nomes.filter(n => n.startsWith(loja.key + '-') && /\.zip$/.test(n))
     .map(n => ({ n, t: (() => { try { return fs.statSync(path.join(NF_DIR, n)).mtimeMs; } catch (e) { return 0; } })() }))
     .sort((a, b) => b.t - a.t);
-  meus.slice(NF_MANTER).forEach(x => { try { fs.unlinkSync(path.join(NF_DIR, x.n)); } catch (e) {} });
+  if (!meus.length) return { ok: true, precisa: false, motivo: 'nenhum arquivo baixado ainda', novas_saida: 0, novas_entrada: 0 };
+
+  const imp = lerImportadas(loja.key);
+  const jaSaida = new Set(imp.saida), jaEntrada = new Set(imp.entrada);
+
+  // pega o ZIP de saída mais recente e o de entrada mais recente
+  const maisRecente = (tipo) => meus.find(x => x.n.includes('-' + tipo + '-'));
+  const zSaida = maisRecente('saida');
+  const zEntrada = maisRecente('entrada');
+
+  function novasDoZip(nome, jaSet) {
+    if (!nome) return { arquivo: null, novas: 0 };
+    const chaves = chavesDoZip(nome);
+    const novas = chaves.filter(c => c && !jaSet.has(c)).length;
+    return { arquivo: nome, novas };
+  }
+  const s = novasDoZip(zSaida && zSaida.n, jaSaida);
+  const e = novasDoZip(zEntrada && zEntrada.n, jaEntrada);
+
+  return {
+    ok: true,
+    precisa: (s.novas + e.novas) > 0,
+    novas_saida: s.novas,
+    novas_entrada: e.novas,
+    arquivo_saida: s.arquivo,
+    arquivo_entrada: e.arquivo,
+    importadas: { saida: imp.saida.length, entrada: imp.entrada.length, quando: imp.quando }
+  };
 }
 
 module.exports = {
-  NF_DIR, rotina, marcarImportadas, chavesDoZip, caminhoZip, limpar,
+  NF_DIR, rotina, estadoAtual, marcarImportadas, chavesDoZip, caminhoZip, limpar,
   lerImportadas, nfEmitente, nfChave, ymdSP,
   // expostos p/ teste
   separarXmls, fbsGerar, fbsAguardar, fbsBaixar
