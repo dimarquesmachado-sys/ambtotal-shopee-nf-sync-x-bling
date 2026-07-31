@@ -494,7 +494,7 @@ app.get('/:loja/interno/sonda-fbs', resolverLoja, async (req, res) => {
 
   const orderSn = String(req.query.order_sn || '').trim();
   const taskId  = String(req.query.task_id || '').trim();
-  const out = { ok: true, versao: 'sonda-fbs v6', loja: req.loja.key, order_sn: orderSn || null, task_id: taskId || null, testes: [] };
+  const out = { ok: true, versao: 'sonda-fbs v7', loja: req.loja.key, order_sn: orderSn || null, task_id: taskId || null, testes: [] };
 
   // helper: chama um apiPath com extraQuery e captura o retorno cru (ou o erro)
   async function tenta(rotulo, apiPath, method, extraQuery, body) {
@@ -510,30 +510,38 @@ app.get('/:loja/interno/sonda-fbs', resolverLoja, async (req, res) => {
     await new Promise(r => setTimeout(r, 400));
   }
 
-  // ETAPA 1 — DESCOBERTA: o próprio shopee-api.js, pra documento de envio, usa
-  // `order_list: [{ order_sn, shipping_document_type }]` (lista de OBJETOS, campo
-  // "order_list"). É o padrão da Shopee pra listas. Eu vinha usando "order_sn_list"
-  // — provavelmente o nome errado. Testo "order_list" com objetos.
+  // ETAPA 1 — FORMATO CORRETO (descoberto no SDK oficial congminh1254/shopee-sdk):
+  // batch_download é um OBJETO com período (start/end em AAAAMMDD como número) e
+  // tipos de documento. NÃO usa order_sn — baixa por JANELA DE TEMPO, igual Magalu.
+  //   document_type: 1=Remessa 2=Return 3=Retorno Simbólico 4=VENDA 5=Entrada 6=Rem.Simb 7=Todos
+  //   file_type: 1=XML 2=PDF 3=ambos
+  //   document_status: 1=autorizadas 2=canceladas (ausente=todas)
+  // Fluxo é de 3 ETAPAS: generate → get_result (status PROCESSING/READY/ERROR) → download.
   if (!taskId) {
-    const bd = false;
-    // N) order_list com objeto (o padrão da etiqueta)
-    await tenta('N: batch_download=false + order_list=[{order_sn}]', '/api/v2/order/generate_fbs_invoices', 'POST', null, { batch_download: bd, order_list: [{ order_sn: orderSn }] });
-    // O) order_list com order_sn + invoice_type
-    await tenta('O: order_list=[{order_sn, invoice_type:1}]', '/api/v2/order/generate_fbs_invoices', 'POST', null, { batch_download: bd, order_list: [{ order_sn: orderSn, invoice_type: 1 }] });
-    // P) sem batch_download, só order_list (talvez batch_download nem exista de verdade)
-    await tenta('P: só order_list=[{order_sn}] (sem batch_download)', '/api/v2/order/generate_fbs_invoices', 'POST', null, { order_list: [{ order_sn: orderSn }] });
-    // Q) order_list de STRINGS (não objetos)
-    await tenta('Q: batch_download=false + order_list=[string]', '/api/v2/order/generate_fbs_invoices', 'POST', null, { batch_download: bd, order_list: [orderSn] });
-    // R) request com "shipping_document_type"-equivalente: invoice_document_type
-    await tenta('R: order_list=[{order_sn, invoice_document_type:"NFE"}]', '/api/v2/order/generate_fbs_invoices', 'POST', null, { batch_download: bd, order_list: [{ order_sn: orderSn, invoice_document_type: 'NFE' }] });
+    // helper: AAAAMMDD como número, a partir de um Date
+    const ymd = (d) => Number(`${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`);
+    const hoje = new Date();
+    const ini30 = new Date(hoje); ini30.setDate(ini30.getDate() - 30);
+    // A) o formato do SDK: VENDA (4), XML (1), últimos 30 dias
+    await tenta('A: batch_download={start,end,document_type:4,file_type:1}', '/api/v2/order/generate_fbs_invoices', 'POST', null,
+      { batch_download: { start: ymd(ini30), end: ymd(hoje), document_type: 4, file_type: 1, document_status: 1 } });
+    // B) TODOS os tipos (7), ambos os formatos (3) — pra ver tudo que existe no período
+    await tenta('B: batch_download={..., document_type:7, file_type:3}', '/api/v2/order/generate_fbs_invoices', 'POST', null,
+      { batch_download: { start: ymd(ini30), end: ymd(hoje), document_type: 7, file_type: 3, document_status: 1 } });
+    // C) sem document_status (todas as situações), VENDA + XML
+    await tenta('C: batch_download={start,end,document_type:4,file_type:1} sem status', '/api/v2/order/generate_fbs_invoices', 'POST', null,
+      { batch_download: { start: ymd(ini30), end: ymd(hoje), document_type: 4, file_type: 1 } });
   }
 
+  // ETAPA 2/3 — request_id_list é um OBJETO { request_id: [números] }, não array solto.
+  // Passa &task_id=NUMERO pra checar status (get_result) e ver o link (download).
   if (taskId) {
-    await tenta('E2: get_fbs_invoices_result (request_id_list body)', '/api/v2/order/get_fbs_invoices_result', 'GET', null, { request_id_list: [taskId] });
-    await tenta('E2-q: get_fbs_invoices_result (request_id_list query)', '/api/v2/order/get_fbs_invoices_result', 'GET', `request_id_list=${encodeURIComponent(taskId)}`, null);
+    const rid = Number(taskId);
+    await tenta('E2 status: get_fbs_invoices_result', '/api/v2/order/get_fbs_invoices_result', 'GET', null, { request_id_list: { request_id: [rid] } });
+    await tenta('E3 download: download_fbs_invoices', '/api/v2/order/download_fbs_invoices', 'GET', null, { request_id_list: { request_id: [rid] } });
   }
 
-  out.como_ler = 'A aposta forte é o teste N/P: campo order_list (não order_sn_list) com objetos {order_sn}, que é o padrão que a Shopee usa pra etiqueta. Se algum trouxer request_id de tarefa SEM error dentro, achamos. Me mande o JSON.';
+  out.como_ler = 'ETAPA 1 (A/B/C): o retorno deve trazer request_id (número) de tarefa criada, SEM error. Copie esse request_id e rode a sonda de novo com &task_id=ESSE_NUMERO — aí a E2 mostra o status (PROCESSING/READY) e a E3, quando READY, mostra a URL do XML (expira em 30min).';
   res.json(out);
 });
 
