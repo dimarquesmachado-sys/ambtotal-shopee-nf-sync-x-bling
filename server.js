@@ -494,7 +494,7 @@ app.get('/:loja/interno/sonda-fbs', resolverLoja, async (req, res) => {
 
   const orderSn = String(req.query.order_sn || '').trim();
   const taskId  = String(req.query.task_id || '').trim();
-  const out = { ok: true, versao: 'sonda-fbs v5', loja: req.loja.key, order_sn: orderSn || null, task_id: taskId || null, testes: [] };
+  const out = { ok: true, versao: 'sonda-fbs v6', loja: req.loja.key, order_sn: orderSn || null, task_id: taskId || null, testes: [] };
 
   // helper: chama um apiPath com extraQuery e captura o retorno cru (ou o erro)
   async function tenta(rotulo, apiPath, method, extraQuery, body) {
@@ -510,25 +510,22 @@ app.get('/:loja/interno/sonda-fbs', resolverLoja, async (req, res) => {
     await new Promise(r => setTimeout(r, 400));
   }
 
-  // ETAPA 1 — o erro vem como retorno[0].error = "Invalid param type", ou seja
-  // DENTRO do primeiro item de uma LISTA de resultados. A API aceitou o
-  // batch_download e tentou processar uma lista, mas cada item deu tipo inválido
-  // → o formato de CADA ITEM da lista está errado. Testo estruturas de item.
+  // ETAPA 1 — DESCOBERTA: o próprio shopee-api.js, pra documento de envio, usa
+  // `order_list: [{ order_sn, shipping_document_type }]` (lista de OBJETOS, campo
+  // "order_list"). É o padrão da Shopee pra listas. Eu vinha usando "order_sn_list"
+  // — provavelmente o nome errado. Testo "order_list" com objetos.
   if (!taskId) {
     const bd = false;
-    // H) lista de OBJETOS { order_sn }
-    await tenta('H: batch_download=false + order_sn_list=[{order_sn}]', '/api/v2/order/generate_fbs_invoices', 'POST', null, { batch_download: bd, order_sn_list: [{ order_sn: orderSn }] });
-    // I) campo chamado "request_list" com objetos
-    await tenta('I: batch_download=false + request_list=[{order_sn}]', '/api/v2/order/generate_fbs_invoices', 'POST', null, { batch_download: bd, request_list: [{ order_sn: orderSn }] });
-    // J) lista de objetos com order_sn E invoice/doc type
-    await tenta('J: order_sn_list=[{order_sn, invoice_type:1}]', '/api/v2/order/generate_fbs_invoices', 'POST', null, { batch_download: bd, order_sn_list: [{ order_sn: orderSn, invoice_type: 1 }] });
-    // K) o "true" (lote) provavelmente NÃO leva lista nenhuma — só período
-    const agora = Math.floor(Date.now() / 1000);
-    await tenta('K: batch_download=true + create_time_from/to', '/api/v2/order/generate_fbs_invoices', 'POST', null, { batch_download: true, create_time_from: agora - 7 * 86400, create_time_to: agora });
-    // L) shop_id_list de objetos (às vezes o FBS é por shop, não por pedido)
-    await tenta('L: batch_download=true + shipment_list', '/api/v2/order/generate_fbs_invoices', 'POST', null, { batch_download: true, shipment_list: [{ order_sn: orderSn }] });
-    // M) CORPO MÍNIMO: só batch_download=false, pra ver a mensagem-base do que falta
-    await tenta('M: SÓ batch_download=false (ver o que pede a seguir)', '/api/v2/order/generate_fbs_invoices', 'POST', null, { batch_download: false });
+    // N) order_list com objeto (o padrão da etiqueta)
+    await tenta('N: batch_download=false + order_list=[{order_sn}]', '/api/v2/order/generate_fbs_invoices', 'POST', null, { batch_download: bd, order_list: [{ order_sn: orderSn }] });
+    // O) order_list com order_sn + invoice_type
+    await tenta('O: order_list=[{order_sn, invoice_type:1}]', '/api/v2/order/generate_fbs_invoices', 'POST', null, { batch_download: bd, order_list: [{ order_sn: orderSn, invoice_type: 1 }] });
+    // P) sem batch_download, só order_list (talvez batch_download nem exista de verdade)
+    await tenta('P: só order_list=[{order_sn}] (sem batch_download)', '/api/v2/order/generate_fbs_invoices', 'POST', null, { order_list: [{ order_sn: orderSn }] });
+    // Q) order_list de STRINGS (não objetos)
+    await tenta('Q: batch_download=false + order_list=[string]', '/api/v2/order/generate_fbs_invoices', 'POST', null, { batch_download: bd, order_list: [orderSn] });
+    // R) request com "shipping_document_type"-equivalente: invoice_document_type
+    await tenta('R: order_list=[{order_sn, invoice_document_type:"NFE"}]', '/api/v2/order/generate_fbs_invoices', 'POST', null, { batch_download: bd, order_list: [{ order_sn: orderSn, invoice_document_type: 'NFE' }] });
   }
 
   if (taskId) {
@@ -536,7 +533,7 @@ app.get('/:loja/interno/sonda-fbs', resolverLoja, async (req, res) => {
     await tenta('E2-q: get_fbs_invoices_result (request_id_list query)', '/api/v2/order/get_fbs_invoices_result', 'GET', `request_id_list=${encodeURIComponent(taskId)}`, null);
   }
 
-  out.como_ler = 'Comparo as mensagens. O teste M (corpo minimo) mostra o que a API pede DEPOIS do batch_download — se mudar de "Invalid param type" pra "campo X required", achamos o proximo campo. Qualquer teste que traga request_id de tarefa (sem error dentro) fecha a etapa 1.';
+  out.como_ler = 'A aposta forte é o teste N/P: campo order_list (não order_sn_list) com objetos {order_sn}, que é o padrão que a Shopee usa pra etiqueta. Se algum trouxer request_id de tarefa SEM error dentro, achamos. Me mande o JSON.';
   res.json(out);
 });
 
