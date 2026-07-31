@@ -13,6 +13,7 @@ const shopee = require('./modules/shopee-api');
 const engine = require('./modules/sync-engine');
 const log = require('./modules/supabase-log');
 const { getConfigLoja, lojasValidas, lojasConfiguradas, SHOPEE_BASE } = require('./modules/lojas');
+const fbsNf = require('./modules/fbs-nf');
 
 const app = express();
 
@@ -59,6 +60,121 @@ app.get('/', (req, res) => {
 });
 
 app.get('/health', (req, res) => res.json({ ok: true, ts: new Date().toISOString() }));
+
+// =============================================================================
+// FBS NF — importação dos XMLs do Shopee Full. O servidor BUSCA na Shopee e
+// separa; a EXTENSÃO do navegador (na aba logada do Bling) baixa o ZIP de
+// XMLs novos e sobe na tela de importação, entrando como loja Shopee + unidade
+// Shopee FULL, com Lançar Contas SIM e Estoque NÃO.
+// Auth por ?k=ADMIN_KEY (ou INTERNAL_KEY). Middleware resolverLoja valida :loja.
+// =============================================================================
+function fbsAuthOk(req) {
+  const chave = String(req.headers['x-internal-key'] || req.query.k || '').trim();
+  const chavesOk = [process.env.INTERNAL_KEY, process.env.ADMIN_KEY].filter(Boolean).map(s => String(s).trim());
+  return chavesOk.some(cv => chave === cv || chave.replace(/ /g, '+') === cv);
+}
+
+// Roda a rotina (gera na Shopee → espera → baixa → separa → grava ZIP de novas).
+// Retorna o resumo. Pode levar ~30-60s (a tarefa da Shopee demora a ficar pronta).
+app.get('/:loja/fbs/rodar', resolverLoja, async (req, res) => {
+  if (!fbsAuthOk(req)) return res.status(401).json({ ok: false, erro: 'chave invalida (ADMIN_KEY ou INTERNAL_KEY deste servico)' });
+  try {
+    const dias = req.query.dias ? Number(req.query.dias) : undefined;
+    const r = await fbsNf.rotina(req.loja, { dias });
+    try { fbsNf.limpar(req.loja.key); } catch (e) {}
+    res.json({ ok: true, loja: req.loja.key, resultado: r });
+  } catch (e) { res.status(500).json({ ok: false, erro: String(e.message || e) }); }
+});
+
+// Lista os ZIPs de novas que estão prontos pra importar (por loja).
+app.get('/:loja/fbs/pendentes', resolverLoja, (req, res) => {
+  if (!fbsAuthOk(req)) return res.status(401).json({ ok: false, erro: 'chave invalida' });
+  let nomes = [];
+  try { nomes = require('fs').readdirSync(fbsNf.NF_DIR); } catch (e) {}
+  const meus = nomes.filter(n => n.startsWith(req.loja.key + '-') && /\.zip$/.test(n)).map(n => {
+    let st = null; try { st = require('fs').statSync(require('path').join(fbsNf.NF_DIR, n)); } catch (e) {}
+    const tipo = /-entrada-/.test(n) ? 'entrada' : (/-saida-/.test(n) ? 'saida' : '?');
+    return { arquivo: n, tipo, bytes: st ? st.size : 0, em: st ? st.mtime.toISOString() : null, chaves: fbsNf.chavesDoZip(n).length };
+  }).sort((a, b) => (b.em || '').localeCompare(a.em || ''));
+  const imp = fbsNf.lerImportadas(req.loja.key);
+  res.json({ ok: true, loja: req.loja.key, arquivos: meus, importadas: { saida: imp.saida.length, entrada: imp.entrada.length, quando: imp.quando } });
+});
+
+// Baixa o conteúdo de um ZIP salvo (a extensão pega este binário e sobe no Bling).
+app.get('/:loja/fbs/zip/:arquivo', resolverLoja, (req, res) => {
+  if (!fbsAuthOk(req)) return res.status(401).send('nao autorizado');
+  const nome = String(req.params.arquivo || '');
+  // trava de segurança: só nomes desta loja, sem path traversal
+  if (!nome.startsWith(req.loja.key + '-') || nome.includes('/') || nome.includes('..') || !/\.zip$/.test(nome)) return res.status(400).send('nome invalido');
+  const p = fbsNf.caminhoZip(nome);
+  try { require('fs').accessSync(p); } catch (e) { return res.status(404).send('nao encontrado'); }
+  res.setHeader('Content-Type', 'application/zip');
+  res.setHeader('Content-Disposition', `attachment; filename="${nome}"`);
+  require('fs').createReadStream(p).pipe(res);
+});
+
+// A extensão chama isto DEPOIS de subir no Bling, pra marcar as chaves como
+// importadas (dedup). body/query: arquivo=NOME (deduz o tipo e as chaves).
+app.get('/:loja/fbs/confirmar/:arquivo', resolverLoja, (req, res) => {
+  if (!fbsAuthOk(req)) return res.status(401).json({ ok: false, erro: 'chave invalida' });
+  const nome = String(req.params.arquivo || '');
+  if (!nome.startsWith(req.loja.key + '-') || nome.includes('/') || nome.includes('..')) return res.status(400).json({ ok: false, erro: 'nome invalido' });
+  const tipo = /-entrada-/.test(nome) ? 'entrada' : 'saida';
+  const chaves = fbsNf.chavesDoZip(nome);
+  const r = fbsNf.marcarImportadas(req.loja.key, tipo, chaves);
+  res.json({ ok: true, loja: req.loja.key, arquivo: nome, tipo, chaves: chaves.length, marcadas: r });
+});
+
+// Painel simples pra acionar/conferir na mão (igual espírito do Magalu).
+app.get('/:loja/fbs/painel', resolverLoja, (req, res) => {
+  if (!fbsAuthOk(req)) return res.status(404).send('Not found');
+  const k = encodeURIComponent(String(req.query.k || ''));
+  const loja = req.loja.key;
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.send(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FBS NF · ${loja}</title>
+<style>body{font-family:system-ui,Arial;margin:20px;max-width:820px;color:#111}
+button{padding:10px 14px;border:1px solid #888;border-radius:8px;background:#f6f6f6;cursor:pointer;font-size:15px}
+button:hover{background:#eee}.zip{border:1px solid #ddd;border-radius:8px;padding:10px 12px;margin:8px 0}
+.t{color:#666;font-size:13px}pre{background:#f6f6f6;padding:10px;border-radius:8px;overflow:auto;font-size:12px}
+a{color:#06c;text-decoration:none}code{background:#eee;padding:1px 5px;border-radius:4px}</style>
+<h2>Notas Shopee Full — ${loja}</h2>
+<p class="t">Busca os XMLs que a Shopee emitiu no Full e deixa prontos pra importar no Bling.<br>
+Ao importar no Bling: <b>loja Shopee</b>, <b>unidade Shopee FULL</b>, <b>Lançar Contas SIM</b>, <b>Estoque NÃO</b>.</p>
+<p><button onclick="rodar()">🔄 Buscar notas na Shopee (últimos 30 dias)</button>
+   <button onclick="listar()">📂 Ver o que está pronto</button></p>
+<div id="msg" class="t"></div>
+<div id="lista"></div>
+<script>
+const K="${k}", LOJA="${loja}";
+async function rodar(){
+  document.getElementById('msg').textContent='Buscando na Shopee… (pode levar ~1 min, a tarefa demora a ficar pronta)';
+  try{ const r=await fetch('/'+LOJA+'/fbs/rodar?k='+K); const j=await r.json();
+    document.getElementById('msg').innerHTML='<pre>'+JSON.stringify(j.resultado||j,null,2)+'</pre>'; listar(); }
+  catch(e){ document.getElementById('msg').textContent='Erro: '+e.message; }
+}
+async function listar(){
+  try{ const r=await fetch('/'+LOJA+'/fbs/pendentes?k='+K); const j=await r.json();
+    const arqs=j.arquivos||[]; const div=document.getElementById('lista');
+    if(!arqs.length){ div.innerHTML='<p class="t">Nada pronto ainda. Clique em Buscar.</p>'; return; }
+    div.innerHTML='<h3>Prontos pra importar</h3>'+arqs.map(a=>
+      '<div class="zip"><b>'+a.tipo.toUpperCase()+'</b> — '+a.chaves+' nota(s) · '+a.bytes+' bytes<br>'+
+      '<span class="t">'+a.arquivo+'</span><br>'+
+      '<a href="/'+LOJA+'/fbs/zip/'+encodeURIComponent(a.arquivo)+'?k='+K+'">⬇️ baixar ZIP</a> &nbsp;·&nbsp; '+
+      '<a href="#" onclick="confirmar(\\''+a.arquivo+'\\');return false">✅ marcar como importado</a></div>'
+    ).join('')+'<p class="t">Importadas até agora — saída: '+(j.importadas?j.importadas.saida:0)+' · entrada: '+(j.importadas?j.importadas.entrada:0)+'</p>';
+  }catch(e){ document.getElementById('lista').textContent='Erro: '+e.message; }
+}
+async function confirmar(arq){
+  if(!confirm('Confirma que já subiu '+arq+' no Bling? Isso marca as notas como importadas (não aparecem mais).'))return;
+  try{ const r=await fetch('/'+LOJA+'/fbs/confirmar/'+encodeURIComponent(arq)+'?k='+K); const j=await r.json();
+    alert('Marcadas: '+JSON.stringify(j.marcadas)); listar(); }
+  catch(e){ alert('Erro: '+e.message); }
+}
+listar();
+</script>`);
+});
+
 
 // DEBUG TEMPORARIO: mostra quais env vars o sistema esta lendo (sem expor valores).
 app.get('/debug-env', (req, res) => {
@@ -494,7 +610,7 @@ app.get('/:loja/interno/sonda-fbs', resolverLoja, async (req, res) => {
 
   const orderSn = String(req.query.order_sn || '').trim();
   const taskId  = String(req.query.task_id || '').trim();
-  const out = { ok: true, versao: 'sonda-fbs v8', loja: req.loja.key, order_sn: orderSn || null, task_id: taskId || null, testes: [] };
+  const out = { ok: true, versao: 'sonda-fbs v6', loja: req.loja.key, order_sn: orderSn || null, task_id: taskId || null, testes: [] };
 
   // helper: chama um apiPath com extraQuery e captura o retorno cru (ou o erro)
   async function tenta(rotulo, apiPath, method, extraQuery, body) {
@@ -510,38 +626,30 @@ app.get('/:loja/interno/sonda-fbs', resolverLoja, async (req, res) => {
     await new Promise(r => setTimeout(r, 400));
   }
 
-  // ETAPA 1 — FORMATO CORRETO (descoberto no SDK oficial congminh1254/shopee-sdk):
-  // batch_download é um OBJETO com período (start/end em AAAAMMDD como número) e
-  // tipos de documento. NÃO usa order_sn — baixa por JANELA DE TEMPO, igual Magalu.
-  //   document_type: 1=Remessa 2=Return 3=Retorno Simbólico 4=VENDA 5=Entrada 6=Rem.Simb 7=Todos
-  //   file_type: 1=XML 2=PDF 3=ambos
-  //   document_status: 1=autorizadas 2=canceladas (ausente=todas)
-  // Fluxo é de 3 ETAPAS: generate → get_result (status PROCESSING/READY/ERROR) → download.
+  // ETAPA 1 — DESCOBERTA: o próprio shopee-api.js, pra documento de envio, usa
+  // `order_list: [{ order_sn, shipping_document_type }]` (lista de OBJETOS, campo
+  // "order_list"). É o padrão da Shopee pra listas. Eu vinha usando "order_sn_list"
+  // — provavelmente o nome errado. Testo "order_list" com objetos.
   if (!taskId) {
-    // helper: AAAAMMDD como número, a partir de um Date
-    const ymd = (d) => Number(`${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`);
-    const hoje = new Date();
-    const ini30 = new Date(hoje); ini30.setDate(ini30.getDate() - 30);
-    // A) o formato do SDK: VENDA (4), XML (1), últimos 30 dias
-    await tenta('A: batch_download={start,end,document_type:4,file_type:1}', '/api/v2/order/generate_fbs_invoices', 'POST', null,
-      { batch_download: { start: ymd(ini30), end: ymd(hoje), document_type: 4, file_type: 1, document_status: 1 } });
-    // B) TODOS os tipos (7), ambos os formatos (3) — pra ver tudo que existe no período
-    await tenta('B: batch_download={..., document_type:7, file_type:3}', '/api/v2/order/generate_fbs_invoices', 'POST', null,
-      { batch_download: { start: ymd(ini30), end: ymd(hoje), document_type: 7, file_type: 3, document_status: 1 } });
-    // C) sem document_status (todas as situações), VENDA + XML
-    await tenta('C: batch_download={start,end,document_type:4,file_type:1} sem status', '/api/v2/order/generate_fbs_invoices', 'POST', null,
-      { batch_download: { start: ymd(ini30), end: ymd(hoje), document_type: 4, file_type: 1 } });
+    const bd = false;
+    // N) order_list com objeto (o padrão da etiqueta)
+    await tenta('N: batch_download=false + order_list=[{order_sn}]', '/api/v2/order/generate_fbs_invoices', 'POST', null, { batch_download: bd, order_list: [{ order_sn: orderSn }] });
+    // O) order_list com order_sn + invoice_type
+    await tenta('O: order_list=[{order_sn, invoice_type:1}]', '/api/v2/order/generate_fbs_invoices', 'POST', null, { batch_download: bd, order_list: [{ order_sn: orderSn, invoice_type: 1 }] });
+    // P) sem batch_download, só order_list (talvez batch_download nem exista de verdade)
+    await tenta('P: só order_list=[{order_sn}] (sem batch_download)', '/api/v2/order/generate_fbs_invoices', 'POST', null, { order_list: [{ order_sn: orderSn }] });
+    // Q) order_list de STRINGS (não objetos)
+    await tenta('Q: batch_download=false + order_list=[string]', '/api/v2/order/generate_fbs_invoices', 'POST', null, { batch_download: bd, order_list: [orderSn] });
+    // R) request com "shipping_document_type"-equivalente: invoice_document_type
+    await tenta('R: order_list=[{order_sn, invoice_document_type:"NFE"}]', '/api/v2/order/generate_fbs_invoices', 'POST', null, { batch_download: bd, order_list: [{ order_sn: orderSn, invoice_document_type: 'NFE' }] });
   }
 
-  // ETAPA 2/3 — request_id_list é um OBJETO { request_id: [números] }, não array solto.
-  // Passa &task_id=NUMERO pra checar status (get_result) e ver o link (download).
   if (taskId) {
-    const rids = taskId.split(',').map(s => Number(s.trim())).filter(n => n > 0);
-    await tenta('E2 status: get_fbs_invoices_result', '/api/v2/order/get_fbs_invoices_result', 'POST', null, { request_id_list: { request_id: rids } });
-    await tenta('E3 download: download_fbs_invoices', '/api/v2/order/download_fbs_invoices', 'POST', null, { request_id_list: { request_id: rids } });
+    await tenta('E2: get_fbs_invoices_result (request_id_list body)', '/api/v2/order/get_fbs_invoices_result', 'GET', null, { request_id_list: [taskId] });
+    await tenta('E2-q: get_fbs_invoices_result (request_id_list query)', '/api/v2/order/get_fbs_invoices_result', 'GET', `request_id_list=${encodeURIComponent(taskId)}`, null);
   }
 
-  out.como_ler = 'ETAPA 1 (A/B/C): o retorno deve trazer request_id (número) de tarefa criada, SEM error. Copie esse request_id e rode a sonda de novo com &task_id=ESSE_NUMERO — aí a E2 mostra o status (PROCESSING/READY) e a E3, quando READY, mostra a URL do XML (expira em 30min).';
+  out.como_ler = 'A aposta forte é o teste N/P: campo order_list (não order_sn_list) com objetos {order_sn}, que é o padrão que a Shopee usa pra etiqueta. Se algum trouxer request_id de tarefa SEM error dentro, achamos. Me mande o JSON.';
   res.json(out);
 });
 
