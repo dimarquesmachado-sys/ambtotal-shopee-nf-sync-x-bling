@@ -1083,6 +1083,31 @@ cron.schedule(CRON_NORMAL, () => dispararCiclo('normal-10min'), { timezone: 'Ame
 
 console.log(`[cron] Agendado CRITICO: ${CRON_CRITICO} | NORMAL: ${CRON_NORMAL} (America/Sao_Paulo)`);
 
+// ── CRON FBS: busca as NF do Shopee Full de tempos em tempos e deixa o ZIP
+// pronto (igual o cron do Magalu: 6h/12h/18h/23h). NÃO importa no Bling —
+// isso é a extensão, quando a aba do Bling está aberta. Só mantém o ZIP fresco,
+// pra quando o Diego abrir o Bling as notas já estarem baixadas. Configurável
+// por env FBS_NF_CRON. Roda pra cada loja configurada que tenha Shopee Full.
+const FBS_CRON = process.env.FBS_NF_CRON || '0 6,12,18,23 * * *';
+// Quais lojas buscar no cron (por padrão só amb, a única no Full hoje).
+const FBS_LOJAS = String(process.env.FBS_NF_LOJAS || 'amb').split(',').map(s => s.trim()).filter(Boolean);
+try {
+  cron.schedule(FBS_CRON, async () => {
+    for (const key of FBS_LOJAS) {
+      try {
+        const loja = getConfigLoja(key);
+        const r = await fbsNf.rotina(loja, {});
+        const n = r.novas ? (r.novas.saida + r.novas.entrada) : 0;
+        console.log(`[fbs-cron] ${key}: ${r.ok ? (n + ' nova(s)') : ('sem notas — ' + (r.motivo || ''))} (período ${r.periodo ? r.periodo.de + '..' + r.periodo.ate : '?'})`);
+      } catch (e) { console.error(`[fbs-cron] ${key} falhou:`, e.message); }
+      await new Promise(r => setTimeout(r, 3000)); // respiro entre lojas
+    }
+  }, { timezone: 'America/Sao_Paulo' });
+  console.log(`[fbs-cron] Agendado: ${FBS_CRON} | lojas: ${FBS_LOJAS.join(', ')} (America/Sao_Paulo)`);
+} catch (e) {
+  console.error('[fbs-cron] nao consegui agendar:', e.message);
+}
+
 app.listen(PORT, () => {
   console.log(`[server] shopee-nf-sync multi-loja rodando na porta ${PORT}`);
   console.log(`[server] SHOPEE_SYNC_BASE_URL: ${SHOPEE_BASE}`);
