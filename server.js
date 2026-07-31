@@ -74,6 +74,22 @@ function fbsAuthOk(req) {
   return chavesOk.some(cv => chave === cv || chave.replace(/ /g, '+') === cv);
 }
 
+// ── CORS pro Bling em TODAS as rotas /fbs/ (a extensão chama de dentro da aba
+// do Bling; sem isto o navegador bloqueia com NetworkError). Mesmo padrão do
+// Magalu. ⚠️ PRECISA vir ANTES de todas as rotas /fbs/ abaixo — no Express a
+// ordem importa: um app.use registrado depois de uma rota não pega essa rota.
+app.use('/:loja/fbs', (req, res, next) => {
+  const origem = req.headers.origin || '';
+  if (/^https:\/\/(www\.)?bling\.com\.br$/.test(origem)) {
+    res.setHeader('Access-Control-Allow-Origin', origem);
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Vary', 'Origin');
+  }
+  if (req.method === 'OPTIONS') return res.status(204).end();
+  next();
+});
+
 // Roda a rotina (gera na Shopee → espera → baixa → separa → grava ZIP de novas).
 // Retorna o resumo. Pode levar ~30-60s (a tarefa da Shopee demora a ficar pronta).
 app.get('/:loja/fbs/rodar', resolverLoja, async (req, res) => {
@@ -123,21 +139,6 @@ app.get('/:loja/fbs/confirmar/:arquivo', resolverLoja, (req, res) => {
   const chaves = fbsNf.chavesDoZip(nome);
   const r = fbsNf.marcarImportadas(req.loja.key, tipo, chaves);
   res.json({ ok: true, loja: req.loja.key, arquivo: nome, tipo, chaves: chaves.length, marcadas: r });
-});
-
-// ── CORS pro Bling nas rotas /fbs/ (a extensão chama de dentro da aba do
-// Bling; sem isto o navegador bloqueia com NetworkError). Mesmo padrão do
-// Magalu: libera só a origem bling.com.br e responde o preflight OPTIONS.
-app.use('/:loja/fbs', (req, res, next) => {
-  const origem = req.headers.origin || '';
-  if (/^https:\/\/(www\.)?bling\.com\.br$/.test(origem)) {
-    res.setHeader('Access-Control-Allow-Origin', origem);
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Vary', 'Origin');
-  }
-  if (req.method === 'OPTIONS') return res.status(204).end();
-  next();
 });
 
 // Rota "estado" no dialeto da extensão do Magalu. IMPORTANTE: NÃO busca na
