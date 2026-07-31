@@ -494,7 +494,7 @@ app.get('/:loja/interno/sonda-fbs', resolverLoja, async (req, res) => {
 
   const orderSn = String(req.query.order_sn || '').trim();
   const taskId  = String(req.query.task_id || '').trim();
-  const out = { ok: true, versao: 'sonda-fbs v7', loja: req.loja.key, order_sn: orderSn || null, task_id: taskId || null, testes: [] };
+  const out = { ok: true, versao: 'sonda-fbs v8', loja: req.loja.key, order_sn: orderSn || null, task_id: taskId || null, testes: [] };
 
   // helper: chama um apiPath com extraQuery e captura o retorno cru (ou o erro)
   async function tenta(rotulo, apiPath, method, extraQuery, body) {
@@ -536,9 +536,9 @@ app.get('/:loja/interno/sonda-fbs', resolverLoja, async (req, res) => {
   // ETAPA 2/3 — request_id_list é um OBJETO { request_id: [números] }, não array solto.
   // Passa &task_id=NUMERO pra checar status (get_result) e ver o link (download).
   if (taskId) {
-    const rid = Number(taskId);
-    await tenta('E2 status: get_fbs_invoices_result', '/api/v2/order/get_fbs_invoices_result', 'GET', null, { request_id_list: { request_id: [rid] } });
-    await tenta('E3 download: download_fbs_invoices', '/api/v2/order/download_fbs_invoices', 'GET', null, { request_id_list: { request_id: [rid] } });
+    const rids = taskId.split(',').map(s => Number(s.trim())).filter(n => n > 0);
+    await tenta('E2 status: get_fbs_invoices_result', '/api/v2/order/get_fbs_invoices_result', 'POST', null, { request_id_list: { request_id: rids } });
+    await tenta('E3 download: download_fbs_invoices', '/api/v2/order/download_fbs_invoices', 'POST', null, { request_id_list: { request_id: rids } });
   }
 
   out.como_ler = 'ETAPA 1 (A/B/C): o retorno deve trazer request_id (número) de tarefa criada, SEM error. Copie esse request_id e rode a sonda de novo com &task_id=ESSE_NUMERO — aí a E2 mostra o status (PROCESSING/READY) e a E3, quando READY, mostra a URL do XML (expira em 30min).';
