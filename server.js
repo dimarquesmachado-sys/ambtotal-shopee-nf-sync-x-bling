@@ -125,6 +125,46 @@ app.get('/:loja/fbs/confirmar/:arquivo', resolverLoja, (req, res) => {
   res.json({ ok: true, loja: req.loja.key, arquivo: nome, tipo, chaves: chaves.length, marcadas: r });
 });
 
+// Rota "estado" no MESMO dialeto da extensão do Magalu, pra a extensão Shopee
+// ser quase idêntica. Roda a rotina (busca+separa) e devolve o que há de novo.
+app.get('/:loja/fbs/ext/estado', resolverLoja, async (req, res) => {
+  if (!fbsAuthOk(req)) return res.status(401).json({ ok: false, erro: 'chave invalida' });
+  try {
+    const r = await fbsNf.rotina(req.loja, {});
+    try { fbsNf.limpar(req.loja.key); } catch (e) {}
+    const nomeSaida = r.arquivos && r.arquivos.saida ? r.arquivos.saida.nome : null;
+    const nomeEntrada = r.arquivos && r.arquivos.entrada ? r.arquivos.entrada.nome : null;
+    const novasSaida = r.novas ? r.novas.saida : 0;
+    const novasEntrada = r.novas ? r.novas.entrada : 0;
+    const kq = encodeURIComponent(String(req.query.k || ''));
+    res.json({
+      ok: true,
+      empresa: req.loja.key,
+      arquivo: nomeSaida || nomeEntrada || null,
+      baixado_em: new Date().toISOString(),
+      precisa: (novasSaida + novasEntrada) > 0,
+      novas_saida: novasSaida,
+      novas_entrada: novasEntrada,
+      emitente: r.emitente || null,
+      url_zip_saida: nomeSaida ? ('/' + req.loja.key + '/fbs/zip/' + encodeURIComponent(nomeSaida) + '?k=' + kq) : null,
+      url_zip_entrada: nomeEntrada ? ('/' + req.loja.key + '/fbs/zip/' + encodeURIComponent(nomeEntrada) + '?k=' + kq) : null,
+      periodo: r.periodo || null,
+      motivo: r.ok ? undefined : r.motivo
+    });
+  } catch (e) { res.status(500).json({ ok: false, erro: String(e.message || e) }); }
+});
+
+// A extensão chama isto após importar, pra marcar as chaves (dedup).
+app.get('/:loja/fbs/ext/registrar', resolverLoja, (req, res) => {
+  if (!fbsAuthOk(req)) return res.status(401).json({ ok: false, erro: 'chave invalida' });
+  const arquivo = String(req.query.arquivo || '');
+  if (!arquivo.startsWith(req.loja.key + '-') || arquivo.includes('/') || arquivo.includes('..')) return res.status(400).json({ ok: false, erro: 'arquivo invalido' });
+  const tipo = /-entrada-/.test(arquivo) ? 'entrada' : 'saida';
+  const chaves = fbsNf.chavesDoZip(arquivo);
+  const r = fbsNf.marcarImportadas(req.loja.key, tipo, chaves);
+  res.json({ ok: true, arquivo, tipo, marcadas: r });
+});
+
 // Painel simples pra acionar/conferir na mão (igual espírito do Magalu).
 app.get('/:loja/fbs/painel', resolverLoja, (req, res) => {
   if (!fbsAuthOk(req)) return res.status(404).send('Not found');
