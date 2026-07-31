@@ -494,7 +494,7 @@ app.get('/:loja/interno/sonda-fbs', resolverLoja, async (req, res) => {
 
   const orderSn = String(req.query.order_sn || '').trim();
   const taskId  = String(req.query.task_id || '').trim();
-  const out = { ok: true, versao: 'sonda-fbs v1', loja: req.loja.key, order_sn: orderSn || null, task_id: taskId || null, testes: [] };
+  const out = { ok: true, versao: 'sonda-fbs v2', loja: req.loja.key, order_sn: orderSn || null, task_id: taskId || null, testes: [] };
 
   // helper: chama um apiPath com extraQuery e captura o retorno cru (ou o erro)
   async function tenta(rotulo, apiPath, method, extraQuery, body) {
@@ -510,21 +510,29 @@ app.get('/:loja/interno/sonda-fbs', resolverLoja, async (req, res) => {
     await new Promise(r => setTimeout(r, 400));
   }
 
-  // ETAPA 1 — gerar a tarefa do documento FBS. Tento algumas grafias de path e
-  // de parâmetro, porque a doc às vezes diverge do que a API aceita.
+  // ETAPA 1 — path e parâmetro JÁ CONFIRMADOS: /api/v2/order/generate_fbs_invoices
+  // com order_sn_list no corpo (deu NO_BATCH_DOWNLOAD = falta um flag de "batch
+  // download", não é erro de acesso nem de path). Aqui descubro o nome do flag.
   if (!taskId) {
-    await tenta('gen A: /api/v2/order/generate_fbs_invoices (order_sn_list body)', '/api/v2/order/generate_fbs_invoices', 'POST', null, { order_sn_list: orderSn ? [orderSn] : [] });
-    await tenta('gen B: /api/v2/fbs/generate_fbs_invoices (order_sn_list body)', '/api/v2/fbs/generate_fbs_invoices', 'POST', null, { order_sn_list: orderSn ? [orderSn] : [] });
-    if (orderSn) await tenta('gen C: /api/v2/order/generate_fbs_invoices (order_sn query)', '/api/v2/order/generate_fbs_invoices', 'POST', `order_sn=${encodeURIComponent(orderSn)}`, null);
+    // as grafias mais prováveis do flag de download em lote
+    await tenta('E1-a: + need_batch_download=true', '/api/v2/order/generate_fbs_invoices', 'POST', null, { order_sn_list: [orderSn], need_batch_download: true });
+    await tenta('E1-b: + batch_download=true', '/api/v2/order/generate_fbs_invoices', 'POST', null, { order_sn_list: [orderSn], batch_download: true });
+    await tenta('E1-c: + is_batch_download=true', '/api/v2/order/generate_fbs_invoices', 'POST', null, { order_sn_list: [orderSn], is_batch_download: true });
+    await tenta('E1-d: + download_type=batch', '/api/v2/order/generate_fbs_invoices', 'POST', null, { order_sn_list: [orderSn], download_type: 'batch' });
+    // e a hipótese de que "batch" signifique PERÍODO (start/end) em vez de lista de order_sn
+    const agora = Math.floor(Date.now() / 1000);
+    await tenta('E1-e: por período (start/end time, últimos 7d)', '/api/v2/order/generate_fbs_invoices', 'POST', null, { start_time: agora - 7 * 86400, end_time: agora });
   }
 
-  // ETAPA 2 — checar o resultado/status da tarefa. Se já houver task_id, checa direto.
-  await tenta('res A: /api/v2/order/get_fbs_invoices_result', '/api/v2/order/get_fbs_invoices_result', 'GET',
-    taskId ? `request_id=${encodeURIComponent(taskId)}` : (orderSn ? `order_sn=${encodeURIComponent(orderSn)}` : null), null);
-  await tenta('res B: /api/v2/fbs/get_fbs_invoices_result', '/api/v2/fbs/get_fbs_invoices_result', 'GET',
-    taskId ? `request_id=${encodeURIComponent(taskId)}` : (orderSn ? `order_sn=${encodeURIComponent(orderSn)}` : null), null);
+  // ETAPA 2 — CONFIRMADA: /api/v2/order/get_fbs_invoices_result pede request_id_list
+  // (deu NO_REQUEST_ID_LIST). Se você já tem um request_id da etapa 1, passa &task_id=
+  // que eu mando no formato certo (array).
+  if (taskId) {
+    await tenta('E2: get_fbs_invoices_result (request_id_list body)', '/api/v2/order/get_fbs_invoices_result', 'GET', null, { request_id_list: [taskId] });
+    await tenta('E2-q: get_fbs_invoices_result (request_id_list query)', '/api/v2/order/get_fbs_invoices_result', 'GET', `request_id_list=${encodeURIComponent(taskId)}`, null);
+  }
 
-  out.como_ler = 'Olhe cada teste: se "error" vier vazio/null e "retorno" tiver dados, aquele path/parametro e o certo. Se "error" disser no_permission/whitelist, o app precisa de liberacao da Shopee pra esse endpoint. Se disser param invalido, o nome do parametro e outro.';
+  out.como_ler = 'ETAPA 1: procuro o teste cujo "error" venha NULL e o retorno traga um request_id/task de verdade — esse e o flag certo. Depois voce roda de novo passando &task_id=ESSE_REQUEST_ID pra eu fechar a ETAPA 2 e ver o link do XML.';
   res.json(out);
 });
 
