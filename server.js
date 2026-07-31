@@ -494,7 +494,7 @@ app.get('/:loja/interno/sonda-fbs', resolverLoja, async (req, res) => {
 
   const orderSn = String(req.query.order_sn || '').trim();
   const taskId  = String(req.query.task_id || '').trim();
-  const out = { ok: true, versao: 'sonda-fbs v3', loja: req.loja.key, order_sn: orderSn || null, task_id: taskId || null, testes: [] };
+  const out = { ok: true, versao: 'sonda-fbs v4', loja: req.loja.key, order_sn: orderSn || null, task_id: taskId || null, testes: [] };
 
   // helper: chama um apiPath com extraQuery e captura o retorno cru (ou o erro)
   async function tenta(rotulo, apiPath, method, extraQuery, body) {
@@ -510,25 +510,36 @@ app.get('/:loja/interno/sonda-fbs', resolverLoja, async (req, res) => {
     await new Promise(r => setTimeout(r, 400));
   }
 
-  // ETAPA 1 — CONFIRMADO: o campo é `batch_download` (só ele tirou o
-  // NO_BATCH_DOWNLOAD e virou "Invalid param type" = campo certo, tipo errado).
-  // Aqui descubro o TIPO que a Shopee quer.
+  // ETAPA 1 — batch_download já é aceito (virou error_param, não mais
+  // NO_BATCH_DOWNLOAD). Mas TODOS os tipos deram error_param → o campo com
+  // problema é OUTRO, que a API passa a exigir quando batch_download está
+  // presente. Aqui testo os campos-companheiros mais prováveis. Uso false como
+  // valor base do batch_download (modo "por lista de pedido", não lote por período).
   if (!taskId) {
-    await tenta('T1: batch_download=1 (número)', '/api/v2/order/generate_fbs_invoices', 'POST', null, { order_sn_list: [orderSn], batch_download: 1 });
-    await tenta('T2: batch_download=0 (número)', '/api/v2/order/generate_fbs_invoices', 'POST', null, { order_sn_list: [orderSn], batch_download: 0 });
-    await tenta('T3: batch_download="true" (string)', '/api/v2/order/generate_fbs_invoices', 'POST', null, { order_sn_list: [orderSn], batch_download: 'true' });
-    await tenta('T4: batch_download SEM order_sn_list', '/api/v2/order/generate_fbs_invoices', 'POST', null, { batch_download: true });
-    await tenta('T5: batch_download=false (o "false" pode ser o modo por lista)', '/api/v2/order/generate_fbs_invoices', 'POST', null, { order_sn_list: [orderSn], batch_download: false });
-    await tenta('T6: batch_download=1 SÓ (sem lista)', '/api/v2/order/generate_fbs_invoices', 'POST', null, { batch_download: 1 });
+    const agora = Math.floor(Date.now() / 1000);
+    const bd = false;   // hipótese: false = baixar os order_sn da lista; true = lote por período
+    // A) só a lista + batch_download=false
+    await tenta('A: batch_download=false + order_sn_list', '/api/v2/order/generate_fbs_invoices', 'POST', null, { batch_download: bd, order_sn_list: [orderSn] });
+    // B) batch_download=true + período (o "lote" costuma ser por janela de tempo)
+    await tenta('B: batch_download=true + start/end_time (7d)', '/api/v2/order/generate_fbs_invoices', 'POST', null, { batch_download: true, start_time: agora - 7 * 86400, end_time: agora });
+    // C) precisa de request_id_list mesmo no generate? (alguns endpoints Shopee usam)
+    await tenta('C: batch_download=false + order_sn_list + need_invoice=true', '/api/v2/order/generate_fbs_invoices', 'POST', null, { batch_download: bd, order_sn_list: [orderSn], need_invoice: true });
+    // D) invoice_type / doc_type costuma ser obrigatório em endpoints de nota
+    await tenta('D: + invoice_type=1', '/api/v2/order/generate_fbs_invoices', 'POST', null, { batch_download: bd, order_sn_list: [orderSn], invoice_type: 1 });
+    // E) file_type (o upload usava file_type=4)
+    await tenta('E: + file_type=1', '/api/v2/order/generate_fbs_invoices', 'POST', null, { batch_download: bd, order_sn_list: [orderSn], file_type: 1 });
+    // F) o campo pode ser order_sn (singular) e não a lista
+    await tenta('F: batch_download=false + order_sn (singular)', '/api/v2/order/generate_fbs_invoices', 'POST', null, { batch_download: bd, order_sn: orderSn });
+    // G) tudo junto: período + tipo
+    await tenta('G: true + período + invoice_type', '/api/v2/order/generate_fbs_invoices', 'POST', null, { batch_download: true, start_time: agora - 7 * 86400, end_time: agora, invoice_type: 1 });
   }
 
-  // ETAPA 2 — pronta pra quando tiver request_id
   if (taskId) {
     await tenta('E2: get_fbs_invoices_result (request_id_list body)', '/api/v2/order/get_fbs_invoices_result', 'GET', null, { request_id_list: [taskId] });
     await tenta('E2-q: get_fbs_invoices_result (request_id_list query)', '/api/v2/order/get_fbs_invoices_result', 'GET', `request_id_list=${encodeURIComponent(taskId)}`, null);
   }
 
-  out.como_ler = 'Procuro o teste cujo error venha NULL e o retorno traga um request_id de tarefa criada (não um error_param aninhado). Esse é o tipo certo do batch_download. Se aparecer, me mande o request_id e rode de novo com &task_id=ele.';
+  out.como_ler = 'Procuro o teste cujo retorno traga request_id de TAREFA (sem error_param aninhado). A mensagem de erro que MUDAR (ex: passar a citar outro campo, ou pedir período) também é pista — me mande o JSON inteiro.';
   res.json(out);
 });
 
