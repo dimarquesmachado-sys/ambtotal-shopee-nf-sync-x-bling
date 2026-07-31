@@ -125,32 +125,54 @@ app.get('/:loja/fbs/confirmar/:arquivo', resolverLoja, (req, res) => {
   res.json({ ok: true, loja: req.loja.key, arquivo: nome, tipo, chaves: chaves.length, marcadas: r });
 });
 
-// Rota "estado" no MESMO dialeto da extensão do Magalu, pra a extensão Shopee
-// ser quase idêntica. Roda a rotina (busca+separa) e devolve o que há de novo.
+// ── CORS pro Bling nas rotas /fbs/ (a extensão chama de dentro da aba do
+// Bling; sem isto o navegador bloqueia com NetworkError). Mesmo padrão do
+// Magalu: libera só a origem bling.com.br e responde o preflight OPTIONS.
+app.use('/:loja/fbs', (req, res, next) => {
+  const origem = req.headers.origin || '';
+  if (/^https:\/\/(www\.)?bling\.com\.br$/.test(origem)) {
+    res.setHeader('Access-Control-Allow-Origin', origem);
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Vary', 'Origin');
+  }
+  if (req.method === 'OPTIONS') return res.status(204).end();
+  next();
+});
+
+// Rota "estado" no dialeto da extensão do Magalu. IMPORTANTE: NÃO busca na
+// Shopee (isso geraria um ZIP a cada chamada). Só LÊ o ZIP mais recente que o
+// cron/painel já baixou e conta as novas — igual o ext/estado do Magalu.
 app.get('/:loja/fbs/ext/estado', resolverLoja, async (req, res) => {
   if (!fbsAuthOk(req)) return res.status(401).json({ ok: false, erro: 'chave invalida' });
   try {
-    const r = await fbsNf.rotina(req.loja, {});
-    try { fbsNf.limpar(req.loja.key); } catch (e) {}
-    const nomeSaida = r.arquivos && r.arquivos.saida ? r.arquivos.saida.nome : null;
-    const nomeEntrada = r.arquivos && r.arquivos.entrada ? r.arquivos.entrada.nome : null;
-    const novasSaida = r.novas ? r.novas.saida : 0;
-    const novasEntrada = r.novas ? r.novas.entrada : 0;
+    const st = fbsNf.estadoAtual(req.loja);
     const kq = encodeURIComponent(String(req.query.k || ''));
+    const nomeSaida = st.arquivo_saida || null;
+    const nomeEntrada = st.arquivo_entrada || null;
     res.json({
       ok: true,
       empresa: req.loja.key,
       arquivo: nomeSaida || nomeEntrada || null,
-      baixado_em: new Date().toISOString(),
-      precisa: (novasSaida + novasEntrada) > 0,
-      novas_saida: novasSaida,
-      novas_entrada: novasEntrada,
-      emitente: r.emitente || null,
+      precisa: st.precisa,
+      novas_saida: st.novas_saida,
+      novas_entrada: st.novas_entrada,
+      importadas: st.importadas || null,
       url_zip_saida: nomeSaida ? ('/' + req.loja.key + '/fbs/zip/' + encodeURIComponent(nomeSaida) + '?k=' + kq) : null,
       url_zip_entrada: nomeEntrada ? ('/' + req.loja.key + '/fbs/zip/' + encodeURIComponent(nomeEntrada) + '?k=' + kq) : null,
-      periodo: r.periodo || null,
-      motivo: r.ok ? undefined : r.motivo
+      motivo: st.motivo
     });
+  } catch (e) { res.status(500).json({ ok: false, erro: String(e.message || e) }); }
+});
+
+// A extensão chama isto UMA VEZ ao abrir, pra buscar o que há de novo na
+// Shopee antes de ler o estado. Gera/atualiza o ZIP -atual (nome fixo,
+// sobrescreve — não acumula). Depois a extensão chama ext/estado (que só lê).
+app.get('/:loja/fbs/ext/buscar', resolverLoja, async (req, res) => {
+  if (!fbsAuthOk(req)) return res.status(401).json({ ok: false, erro: 'chave invalida' });
+  try {
+    const r = await fbsNf.rotina(req.loja, {});
+    res.json({ ok: true, empresa: req.loja.key, resultado: { precisa: r.novas ? (r.novas.saida + r.novas.entrada) > 0 : false, novas: r.novas, emitente: r.emitente, periodo: r.periodo, motivo: r.ok ? undefined : r.motivo } });
   } catch (e) { res.status(500).json({ ok: false, erro: String(e.message || e) }); }
 });
 
