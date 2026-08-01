@@ -41,7 +41,7 @@ function resolverLoja(req, res, next) {
 app.get('/', (req, res) => {
   res.json({
     service: 'shopee-nf-sync',
-    version: '2.6.0-multiloja (etiqueta ZPL/ZIP/PDF direto da Shopee)',
+    version: '2.7.0-multiloja (devolucoes API oficial + etiqueta ZPL/ZIP/PDF)',
     status: 'rodando',
     shopee_base_url: SHOPEE_BASE,
     timezone: process.env.TZ || 'America/Sao_Paulo',
@@ -1107,6 +1107,95 @@ try {
 } catch (e) {
   console.error('[fbs-cron] nao consegui agendar:', e.message);
 }
+
+// ============================================================================
+// DEVOLUCOES pela API OFICIAL (v2.7.0) — pro bloco vermelho do Devolucoes AMB.
+// Busca a devolucao de um pedido e diz se JA foi entregue de volta e QUANDO.
+// Endpoint oficial: /api/v2/returns/get_return_list + get_return_detail.
+// Como o formato exato dos campos varia, a rota tenta os caminhos provaveis e,
+// com &diag=1, devolve o JSON CRU da Shopee pra confirmarmos os campos reais.
+// Auth: ?k=ADMIN_KEY ou INTERNAL_KEY.  /:loja resolvido pelo resolverLoja.
+// ============================================================================
+app.get('/:loja/devolucao', resolverLoja, async (req, res) => {
+  const chave = String(req.headers['x-internal-key'] || req.query.k || '').trim();
+  const okK = [process.env.INTERNAL_KEY, process.env.ADMIN_KEY].filter(Boolean).map(x => String(x).trim()).includes(chave);
+  if (!okK) return res.status(401).json({ ok: false, erro: 'chave invalida (ADMIN_KEY ou INTERNAL_KEY deste servico)' });
+
+  const orderSn = String(req.query.order_sn || req.query.sn || '').trim();
+  const diag = String(req.query.diag || '') === '1';
+  const dias = Math.min(parseInt(req.query.dias || '60', 10) || 60, 120);
+  if (!orderSn && !req.query.listar) {
+    return res.status(400).json({ ok: false, erro: 'faltou ?order_sn= (ou ?listar=1 pra so listar a janela)' });
+  }
+
+  const passos = [];
+  const agora = Math.floor(Date.now() / 1000);
+  const inicio = agora - dias * 86400;
+
+  try {
+    // 1) LISTAR devolucoes da janela — get_return_list. Alguns tenants aceitam
+    //    filtro por create_time; guardamos a lista pra achar o return_sn do pedido.
+    let lista = [], listErro = null, listCru = null;
+    try {
+      const rl = await shopee.shopeeApiCall(req.loja, '/api/v2/returns/get_return_list', 'GET', null,
+        `page_no=0&page_size=100&create_time_from=${inicio}&create_time_to=${agora}`);
+      listCru = rl.data;
+      lista = (rl.data && rl.data.response && (rl.data.response.return || rl.data.response.return_list || rl.data.response.list)) || [];
+      if (rl.data && rl.data.error) listErro = rl.data.error + ' / ' + (rl.data.message || '');
+    } catch (e) { listErro = String(e.message || e).slice(0, 160); }
+    passos.push({ passo: 'get_return_list', itens: Array.isArray(lista) ? lista.length : 0, erro: listErro, cru: diag ? listCru : undefined });
+
+    if (req.query.listar) {
+      return res.json({ ok: !listErro, loja: req.loja.key, janela_dias: dias, total: Array.isArray(lista) ? lista.length : 0,
+        amostra: (lista || []).slice(0, 5), passos });
+    }
+
+    // 2) achar o return desse pedido na lista (por order_sn)
+    const achado = (lista || []).find(r => String(r.order_sn || r.orderSn || '') === orderSn) || null;
+    const returnSn = achado && (achado.return_sn || achado.returnSn || achado.return_sn_list) || String(req.query.return_sn || '').trim() || null;
+    passos.push({ passo: 'match_pedido', achou_na_lista: !!achado, return_sn: returnSn });
+
+    // 3) DETALHE da devolucao — get_return_detail (traz status e datas)
+    let detalhe = null, detErro = null, detCru = null;
+    if (returnSn) {
+      try {
+        const rd = await shopee.shopeeApiCall(req.loja, '/api/v2/returns/get_return_detail', 'GET', null,
+          `return_sn=${encodeURIComponent(returnSn)}`);
+        detCru = rd.data;
+        detalhe = (rd.data && rd.data.response) || null;
+        if (rd.data && rd.data.error) detErro = rd.data.error + ' / ' + (rd.data.message || '');
+      } catch (e) { detErro = String(e.message || e).slice(0, 160); }
+      passos.push({ passo: 'get_return_detail', ok: !detErro, erro: detErro, cru: diag ? detCru : undefined });
+    }
+
+    // 4) tenta extrair status + data de entrega da devolucao do que veio
+    const fonte = detalhe || achado || {};
+    const status = fonte.status || fonte.return_status || null;
+    // varre recursivamente por um timestamp de "entregue/devolvido"
+    let entregueEm = null;
+    (function varre(o, prof) {
+      if (!o || typeof o !== 'object' || prof > 6 || entregueEm) return;
+      for (const k of Object.keys(o)) {
+        const v = o[k];
+        if (/deliver|return.*time|receive|logistics.*time|update_time/i.test(k) && (typeof v === 'number' || /^\d{9,}$/.test(String(v)))) {
+          const n = Number(v); if (n > 1e9 && n < 2e10) { entregueEm = new Date(n * 1000).toISOString(); return; }
+        }
+        if (v && typeof v === 'object') varre(v, prof + 1);
+      }
+    })(fonte, 0);
+
+    const entregue = /RETURN.*DONE|COMPLETED|RECEIVE|REFUND_PAID|CLOSED/i.test(String(status || '')) || !!entregueEm;
+
+    return res.json({
+      ok: true, loja: req.loja.key, order_sn: orderSn, return_sn: returnSn,
+      status, entregue, entregue_em: entregueEm,
+      dica: entregue ? null : 'status nao terminal ou sem data — veja passos (rode com &diag=1 pra ver o JSON cru e mapear os campos certos)',
+      passos
+    });
+  } catch (e) {
+    return res.status(200).json({ ok: false, loja: req.loja.key, order_sn: orderSn, erro: String(e.message || e).slice(0, 200), passos });
+  }
+});
 
 app.listen(PORT, () => {
   console.log(`[server] shopee-nf-sync multi-loja rodando na porta ${PORT}`);
