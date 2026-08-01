@@ -41,7 +41,7 @@ function resolverLoja(req, res, next) {
 app.get('/', (req, res) => {
   res.json({
     service: 'shopee-nf-sync',
-    version: '2.7.1-multiloja (devolucoes API oficial, janela 15d fatiada)',
+    version: '2.7.2-multiloja (devolucoes + tracking reverso p/ data de chegada)',
     status: 'rodando',
     shopee_base_url: SHOPEE_BASE,
     timezone: process.env.TZ || 'America/Sao_Paulo',
@@ -1183,28 +1183,69 @@ app.get('/:loja/devolucao', resolverLoja, async (req, res) => {
       passos.push({ passo: 'get_return_detail', ok: !detErro, erro: detErro, cru: diag ? detCru : undefined });
     }
 
-    // 4) tenta extrair status + data de entrega da devolucao do que veio
+    // 4) ENTREGUE NO ESTOQUE = reverse_logistics_status/logistics_status
+    //    == LOGISTICS_DELIVERY_DONE (sinal confiavel do get_return_detail).
     const fonte = detalhe || achado || {};
     const status = fonte.status || fonte.return_status || null;
-    // varre recursivamente por um timestamp de "entregue/devolvido"
-    let entregueEm = null;
-    (function varre(o, prof) {
-      if (!o || typeof o !== 'object' || prof > 6 || entregueEm) return;
-      for (const k of Object.keys(o)) {
-        const v = o[k];
-        if (/deliver|return.*time|receive|logistics.*time|update_time/i.test(k) && (typeof v === 'number' || /^\d{9,}$/.test(String(v)))) {
-          const n = Number(v); if (n > 1e9 && n < 2e10) { entregueEm = new Date(n * 1000).toISOString(); return; }
-        }
-        if (v && typeof v === 'object') varre(v, prof + 1);
-      }
-    })(fonte, 0);
+    const revStatus = fonte.reverse_logistics_status || fonte.logistics_status || null;
+    const chegouNoEstoque = /DELIVERY_DONE|RECEIVED|WAREHOUSE/i.test(String(revStatus || '')) ||
+                            fonte.is_arrived_at_warehouse === 1;
 
-    const entregue = /RETURN.*DONE|COMPLETED|RECEIVE|REFUND_PAID|CLOSED/i.test(String(status || '')) || !!entregueEm;
+    // 5) DATA FISICA da chegada — mora no rastreio reverso. O get_return_detail
+    //    NAO traz o timestamp exato (traz create/update/due). Buscamos o tracking
+    //    reverso oficial. Como o nome do endpoint varia, tentamos os candidatos e,
+    //    com &diag=1, devolvemos o cru pra confirmar o campo certo.
+    let chegouEm = null, trkCru = null, trkPasso = null;
+    if (returnSn && (chegouNoEstoque || req.query.forcar_tracking)) {
+      const candidatos = [
+        '/api/v2/returns/get_return_tracking_info',
+        '/api/v2/returns/get_tracking_info',
+        '/api/v2/returns/get_return_tracking',
+        '/api/v2/logistics/get_tracking_info'
+      ];
+      for (const ep of candidatos) {
+        try {
+          const rt = await shopee.shopeeApiCall(req.loja, ep, 'GET', null, `return_sn=${encodeURIComponent(returnSn)}`);
+          const erro = (rt.data && rt.data.error) ? (rt.data.error + ' / ' + (rt.data.message || '')) : null;
+          if (!erro && rt.data && rt.data.response) {
+            trkCru = rt.data; trkPasso = ep;
+            // procura o evento de "entregue/devolvido" e seu timestamp
+            let melhor = null;
+            (function varre(o, prof) {
+              if (!o || prof > 7) return;
+              if (Array.isArray(o)) { o.forEach(x => varre(x, prof + 1)); return; }
+              if (typeof o !== 'object') return;
+              const txt = String(o.description || o.logistics_status || o.status || o.tracking_info || o.message || '');
+              const t = o.update_time || o.timestamp || o.ctime || o.time || o.status_update_time || null;
+              if (t && (/deliver|devolv|entregue|received|arrived/i.test(txt) || /DELIVERY_DONE/i.test(txt))) {
+                const n = Number(t); if (n > 1e9 && n < 2e10 && (!melhor || n > melhor)) melhor = n;
+              }
+              for (const k of Object.keys(o)) if (o[k] && typeof o[k] === 'object') varre(o[k], prof + 1);
+            })(rt.data.response, 0);
+            if (melhor) chegouEm = new Date(melhor * 1000).toISOString();
+            passos.push({ passo: 'tracking_reverso', endpoint: ep, ok: true, chegou_em: chegouEm, cru: diag ? trkCru : undefined });
+            break;
+          } else {
+            passos.push({ passo: 'tracking_reverso', endpoint: ep, ok: false, erro: erro || 'sem response' });
+          }
+        } catch (e) {
+          passos.push({ passo: 'tracking_reverso', endpoint: ep, ok: false, erro: String(e.message || e).slice(0, 120) });
+        }
+      }
+    }
 
     return res.json({
       ok: true, loja: req.loja.key, order_sn: orderSn, return_sn: returnSn,
-      status, entregue, entregue_em: entregueEm,
-      dica: entregue ? null : 'status nao terminal ou sem data — veja passos (rode com &diag=1 pra ver o JSON cru e mapear os campos certos)',
+      status, reverse_logistics_status: revStatus,
+      chegou_no_estoque: chegouNoEstoque,
+      chegou_em: chegouEm,   // data FISICA da entrada no estoque (do tracking reverso)
+      // datas de referencia do get_return_detail, caso o tracking nao dê a exata:
+      aberto_em: fonte.create_time ? new Date(fonte.create_time * 1000).toISOString() : null,
+      atualizado_em: fonte.update_time ? new Date(fonte.update_time * 1000).toISOString() : null,
+      canal_reverso: fonte.reverse_logistics_channel_name || null,
+      dica: chegouNoEstoque
+        ? (chegouEm ? null : 'chegou no estoque, mas a data exata nao veio do tracking — rode com &diag=1 pra ver o cru dos endpoints tentados')
+        : 'ainda nao consta chegada no estoque (reverse_logistics_status != DELIVERY_DONE)',
       passos
     });
   } catch (e) {
