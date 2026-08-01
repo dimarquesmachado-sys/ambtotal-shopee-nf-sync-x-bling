@@ -41,7 +41,7 @@ function resolverLoja(req, res, next) {
 app.get('/', (req, res) => {
   res.json({
     service: 'shopee-nf-sync',
-    version: '2.7.0-multiloja (devolucoes API oficial + etiqueta ZPL/ZIP/PDF)',
+    version: '2.7.1-multiloja (devolucoes API oficial, janela 15d fatiada)',
     status: 'rodando',
     shopee_base_url: SHOPEE_BASE,
     timezone: process.env.TZ || 'America/Sao_Paulo',
@@ -1130,24 +1130,39 @@ app.get('/:loja/devolucao', resolverLoja, async (req, res) => {
 
   const passos = [];
   const agora = Math.floor(Date.now() / 1000);
-  const inicio = agora - dias * 86400;
+
+  // helper: extrai a lista de devolucoes de qualquer formato que a Shopee use
+  const extrairLista = (data) => {
+    const r = (data && data.response) || {};
+    return r.return || r.return_list || r.list || (Array.isArray(r) ? r : []) || [];
+  };
 
   try {
-    // 1) LISTAR devolucoes da janela — get_return_list. Alguns tenants aceitam
-    //    filtro por create_time; guardamos a lista pra achar o return_sn do pedido.
-    let lista = [], listErro = null, listCru = null;
-    try {
-      const rl = await shopee.shopeeApiCall(req.loja, '/api/v2/returns/get_return_list', 'GET', null,
-        `page_no=0&page_size=100&create_time_from=${inicio}&create_time_to=${agora}`);
-      listCru = rl.data;
-      lista = (rl.data && rl.data.response && (rl.data.response.return || rl.data.response.return_list || rl.data.response.list)) || [];
-      if (rl.data && rl.data.error) listErro = rl.data.error + ' / ' + (rl.data.message || '');
-    } catch (e) { listErro = String(e.message || e).slice(0, 160); }
-    passos.push({ passo: 'get_return_list', itens: Array.isArray(lista) ? lista.length : 0, erro: listErro, cru: diag ? listCru : undefined });
+    // 1) LISTAR devolucoes — a Shopee LIMITA a janela a 15 DIAS por chamada.
+    //    Varremos pra tras em fatias de 15d ate cobrir ?dias (default 60, max 120),
+    //    juntando tudo. Mesmo padrao que o servico ja usa pros cancelados.
+    const FATIA = 15 * 86400;
+    let lista = [], listErro = null, cruPrimeira = null;
+    let fim = agora;
+    let fatias = 0;
+    while (fim > agora - dias * 86400 && fatias < 9) {
+      const ini = Math.max(agora - dias * 86400, fim - FATIA + 1);
+      try {
+        const rl = await shopee.shopeeApiCall(req.loja, '/api/v2/returns/get_return_list', 'GET', null,
+          `page_no=0&page_size=100&create_time_from=${ini}&create_time_to=${fim}`);
+        if (fatias === 0) cruPrimeira = rl.data;
+        const parte = extrairLista(rl.data);
+        if (Array.isArray(parte)) lista = lista.concat(parte);
+        if (rl.data && rl.data.error && !listErro) listErro = rl.data.error + ' / ' + (rl.data.message || '');
+      } catch (e) { if (!listErro) listErro = String(e.message || e).slice(0, 160); }
+      fim = ini - 1;
+      fatias++;
+    }
+    passos.push({ passo: 'get_return_list', fatias, itens: Array.isArray(lista) ? lista.length : 0, erro: listErro, cru: diag ? cruPrimeira : undefined });
 
     if (req.query.listar) {
-      return res.json({ ok: !listErro, loja: req.loja.key, janela_dias: dias, total: Array.isArray(lista) ? lista.length : 0,
-        amostra: (lista || []).slice(0, 5), passos });
+      return res.json({ ok: !listErro && lista.length >= 0, loja: req.loja.key, janela_dias: dias, fatias,
+        total: Array.isArray(lista) ? lista.length : 0, amostra: (lista || []).slice(0, 8), passos });
     }
 
     // 2) achar o return desse pedido na lista (por order_sn)
