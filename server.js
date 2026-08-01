@@ -41,7 +41,7 @@ function resolverLoja(req, res, next) {
 app.get('/', (req, res) => {
   res.json({
     service: 'shopee-nf-sync',
-    version: '2.7.2-multiloja (devolucoes + tracking reverso p/ data de chegada)',
+    version: '2.7.3-multiloja (tracking reverso via logistics/get_tracking_info order_sn)',
     status: 'rodando',
     shopee_base_url: SHOPEE_BASE,
     timezone: process.env.TZ || 'America/Sao_Paulo',
@@ -1197,15 +1197,17 @@ app.get('/:loja/devolucao', resolverLoja, async (req, res) => {
     //    com &diag=1, devolvemos o cru pra confirmar o campo certo.
     let chegouEm = null, trkCru = null, trkPasso = null;
     if (returnSn && (chegouNoEstoque || req.query.forcar_tracking)) {
+      // /api/v2/logistics/get_tracking_info EXISTE (os *returns/* dao error_not_found)
+      // e exige order_sn (nao return_sn). Tentamos com order_sn; o get_tracking_info
+      // devolve o tracking da LOGISTICA REVERSA quando o pedido esta em devolucao.
       const candidatos = [
-        '/api/v2/returns/get_return_tracking_info',
-        '/api/v2/returns/get_tracking_info',
-        '/api/v2/returns/get_return_tracking',
-        '/api/v2/logistics/get_tracking_info'
+        { ep: '/api/v2/logistics/get_tracking_info', q: `order_sn=${encodeURIComponent(orderSn)}` },
+        { ep: '/api/v2/logistics/get_tracking_info', q: `order_sn=${encodeURIComponent(orderSn)}&package_number=` },
+        { ep: '/api/v2/returns/get_return_tracking_info', q: `return_sn=${encodeURIComponent(returnSn)}` }
       ];
-      for (const ep of candidatos) {
+      for (const { ep, q } of candidatos) {
         try {
-          const rt = await shopee.shopeeApiCall(req.loja, ep, 'GET', null, `return_sn=${encodeURIComponent(returnSn)}`);
+          const rt = await shopee.shopeeApiCall(req.loja, ep, 'GET', null, q);
           const erro = (rt.data && rt.data.error) ? (rt.data.error + ' / ' + (rt.data.message || '')) : null;
           if (!erro && rt.data && rt.data.response) {
             trkCru = rt.data; trkPasso = ep;
@@ -1223,13 +1225,13 @@ app.get('/:loja/devolucao', resolverLoja, async (req, res) => {
               for (const k of Object.keys(o)) if (o[k] && typeof o[k] === 'object') varre(o[k], prof + 1);
             })(rt.data.response, 0);
             if (melhor) chegouEm = new Date(melhor * 1000).toISOString();
-            passos.push({ passo: 'tracking_reverso', endpoint: ep, ok: true, chegou_em: chegouEm, cru: diag ? trkCru : undefined });
+            passos.push({ passo: 'tracking_reverso', endpoint: ep, query: q, ok: true, chegou_em: chegouEm, cru: diag ? trkCru : undefined });
             break;
           } else {
-            passos.push({ passo: 'tracking_reverso', endpoint: ep, ok: false, erro: erro || 'sem response' });
+            passos.push({ passo: 'tracking_reverso', endpoint: ep, query: q, ok: false, erro: erro || 'sem response', cru: diag ? rt.data : undefined });
           }
         } catch (e) {
-          passos.push({ passo: 'tracking_reverso', endpoint: ep, ok: false, erro: String(e.message || e).slice(0, 120) });
+          passos.push({ passo: 'tracking_reverso', endpoint: ep, query: q, ok: false, erro: String(e.message || e).slice(0, 120) });
         }
       }
     }
