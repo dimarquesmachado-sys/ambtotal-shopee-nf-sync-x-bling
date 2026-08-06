@@ -271,9 +271,14 @@ app.get('/debug-env', (req, res) => {
 // Uso: GET /girassol/interno/escrow/260805H3QGT96R?k=INTERNAL_KEY
 // Devolve a resposta CRUA da Shopee — quem interpreta e o dashboard.
 app.get('/:loja/interno/escrow/:orderSn', resolverLoja, async (req, res) => {
-  const chave = req.headers['x-internal-key'] || req.query.k || '';
-  if (!process.env.INTERNAL_KEY || chave !== process.env.INTERNAL_KEY) {
-    return res.status(401).json({ ok: false, erro: 'chave interna invalida' });
+  // 05/08 correcao: a 1a versao so aceitava INTERNAL_KEY e deu 401. A rota de
+  // etiqueta (que o checkout ja usa ha meses) aceita INTERNAL_KEY OU ADMIN_KEY
+  // deste servico, e ainda desfaz o troca-troca de "+" por espaco que acontece
+  // quando a chave viaja na query string. Copiei a MESMA validacao pra ca.
+  const chaveE = String(req.headers['x-internal-key'] || req.query.k || '').trim();
+  const okE = [process.env.INTERNAL_KEY, process.env.ADMIN_KEY].filter(Boolean).map(s => String(s).trim());
+  if (!okE.length || !okE.some(cv => chaveE === cv || chaveE.replace(/ /g, '+') === cv)) {
+    return res.status(401).json({ ok: false, erro: 'chave invalida - use a INTERNAL_KEY ou a ADMIN_KEY DESTE servico' });
   }
   const orderSn = String(req.params.orderSn || '').trim();
   if (!orderSn) return res.status(400).json({ ok: false, erro: 'passe o order_sn na URL' });
