@@ -337,6 +337,28 @@ app.get('/:loja/interno/devolucoes', resolverLoja, async (req, res) => {
   } catch (e) { return res.status(500).json({ ok: false, erro: String((e && e.message) || e) }); }
 });
 
+// SONDA GENERICA (06/08) — chama QUALQUER endpoint GET da Shopee e devolve o cru.
+// Existe por dois motivos praticos:
+//  1) ADS: o dominio de anuncios exige permissao especial da Shopee. Em vez de eu
+//     adivinhar se esta liberado, a sonda pergunta pra ela:
+//     ?caminho=/api/v2/ads/get_total_balance
+//  2) AMBTOTAL: o :loja da URL ja atende amb/girassol/good, entao da pra olhar o
+//     financeiro da AMB (inclusive o fbs_fee do Shopee Full, que na Girassol vem
+//     ZERO porque ela nao usa Full) SEM subir nada novo.
+// So GET, so admin, e o caminho tem que comecar com /api/v2/ — nada de passagem livre.
+app.get('/:loja/interno/shopee-raw', resolverLoja, async (req, res) => {
+  if (!_shopeeAuthOk(req)) return res.status(401).json({ ok: false, erro: 'chave invalida - use a INTERNAL_KEY ou a ADMIN_KEY DESTE servico' });
+  const caminho = String(req.query.caminho || '').trim();
+  if (!/^\/api\/v2\/[a-z0-9_\/]+$/i.test(caminho)) {
+    return res.status(400).json({ ok: false, erro: 'passe ?caminho=/api/v2/... (so GET, so caminho de API v2)' });
+  }
+  const q = String(req.query.q || '').replace(/^[?&]+/, '');
+  try {
+    const r = await shopee.shopeeApiCall(req.loja, caminho, 'GET', null, q || null);
+    return res.json({ ok: !!r.ok, loja: req.loja.key, caminho, q: q || null, resposta: r.data || null });
+  } catch (e) { return res.status(500).json({ ok: false, erro: String((e && e.message) || e) }); }
+});
+
 // LISTA DE ESCROW LIBERADO no periodo — e a tela "Minha Renda / Pedidos Completos".
 // Serve pra conciliar: o que a Shopee liberou x o que a gente tem gravado.
 app.get('/:loja/interno/escrow-liberado', resolverLoja, async (req, res) => {
