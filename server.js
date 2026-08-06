@@ -262,6 +262,89 @@ app.get('/debug-env', (req, res) => {
 // v2.2.2 - status do indice tracking (diagnostico rapido, NAO reconstroi).
 // Mostra por loja: se ja esta quente, idade, total de cancelados e quantos
 // tem rastreio. Serve pra medir o gargalo do pre-aquecimento.
+// ════════════════════════════════════════════════════════════════════════════
+//  06/08/2026 — FINANCEIRO COMPLETO DA SHOPEE, PELA API OFICIAL
+//  Pedido do Diego: "1º tem que ser a fonte a Shopee, em último caso o Bling".
+//  E com razao: ads, promocoes, armazenagem no Full, envio pro Full, custo de
+//  devolucao — NADA disso passa pelo Bling. Custo que nao aparece vira lucro falso.
+//
+//  Estas rotas ficam AQUI porque este servico e o dono do token e ja atende as
+//  TRES lojas (amb / girassol / good) pelo :loja da URL. Ou seja: quando o
+//  dashboard for pra AMBTotal, o lado do servidor ja esta pronto — inclusive o
+//  fbs_fee do escrow, que na AMB nao vem zero porque la tem Shopee Full.
+//
+//  TODAS devolvem a resposta CRUA da Shopee. Quem interpreta e o dashboard, e so
+//  depois de olhar uma amostra de verdade.
+// ════════════════════════════════════════════════════════════════════════════
+function _shopeeAuthOk(req) {
+  const chave = String(req.headers['x-internal-key'] || req.query.k || '').trim();
+  const ok = [process.env.INTERNAL_KEY, process.env.ADMIN_KEY].filter(Boolean).map(s => String(s).trim());
+  return ok.length && ok.some(cv => chave === cv || chave.replace(/ /g, '+') === cv);
+}
+const _epoch = (v, padraoDias) => {
+  const n = Number(v);
+  if (isFinite(n) && n > 1000000000) return Math.floor(n);            // ja veio em epoch
+  return Math.floor((Date.now() - (padraoDias || 7) * 864e5) / 1000);  // reserva
+};
+
+// CARTEIRA — o equivalente ao billing do ML: ads, ajustes, reembolsos, saques.
+// Uso: /girassol/interno/carteira?dias=7&k=CHAVE   (ou &de=&ate= em epoch)
+app.get('/:loja/interno/carteira', resolverLoja, async (req, res) => {
+  if (!_shopeeAuthOk(req)) return res.status(401).json({ ok: false, erro: 'chave invalida - use a INTERNAL_KEY ou a ADMIN_KEY DESTE servico' });
+  const dias = Math.min(60, Math.max(1, Number(req.query.dias || 7)));
+  const de = _epoch(req.query.de, dias);
+  const ate = Number(req.query.ate) > 1000000000 ? Math.floor(Number(req.query.ate)) : Math.floor(Date.now() / 1000);
+  const page = Math.max(1, Number(req.query.page || 1));
+  const size = Math.min(100, Math.max(1, Number(req.query.size || 40)));
+  try {
+    const r = await shopee.shopeeApiCall(req.loja, '/api/v2/payment/get_wallet_transaction_list', 'GET', null,
+      `page_no=${page}&page_size=${size}&create_time_from=${de}&create_time_to=${ate}`);
+    return res.json({ ok: !!r.ok, loja: req.loja.key, de, ate, page, resposta: r.data || null });
+  } catch (e) { return res.status(500).json({ ok: false, erro: String((e && e.message) || e) }); }
+});
+
+// ESCROW EM LOTE — ate 50 pedidos por chamada (a doc recomenda 1 a 20).
+// Uso: /girassol/interno/escrow-lote?sns=260806K85EPVXY,260805JK61BNC8&k=CHAVE
+app.get('/:loja/interno/escrow-lote', resolverLoja, async (req, res) => {
+  if (!_shopeeAuthOk(req)) return res.status(401).json({ ok: false, erro: 'chave invalida - use a INTERNAL_KEY ou a ADMIN_KEY DESTE servico' });
+  const sns = String(req.query.sns || '').split(',').map(s => s.trim()).filter(Boolean).slice(0, 50);
+  if (!sns.length) return res.status(400).json({ ok: false, erro: 'passe ?sns=ORDER1,ORDER2 (ate 50)' });
+  try {
+    const r = await shopee.shopeeApiCall(req.loja, '/api/v2/payment/get_escrow_detail_batch', 'POST', { order_sn_list: sns });
+    return res.json({ ok: !!r.ok, loja: req.loja.key, pedidos: sns.length, resposta: r.data || null });
+  } catch (e) { return res.status(500).json({ ok: false, erro: String((e && e.message) || e) }); }
+});
+
+// DEVOLUCOES — a devolucao e o custo dela.
+// ⚠️ Os parametros deste dominio eu NAO confirmei na doc; a rota devolve o cru
+// justamente pra descobrirmos o formato sem chutar (foi assim que fechamos o escrow).
+app.get('/:loja/interno/devolucoes', resolverLoja, async (req, res) => {
+  if (!_shopeeAuthOk(req)) return res.status(401).json({ ok: false, erro: 'chave invalida - use a INTERNAL_KEY ou a ADMIN_KEY DESTE servico' });
+  const dias = Math.min(60, Math.max(1, Number(req.query.dias || 30)));
+  const de = _epoch(req.query.de, dias);
+  const ate = Number(req.query.ate) > 1000000000 ? Math.floor(Number(req.query.ate)) : Math.floor(Date.now() / 1000);
+  const page = Math.max(0, Number(req.query.page || 0));
+  try {
+    const r = await shopee.shopeeApiCall(req.loja, '/api/v2/returns/get_return_list', 'GET', null,
+      `page_no=${page}&page_size=${Math.min(100, Number(req.query.size || 40))}&create_time_from=${de}&create_time_to=${ate}`);
+    return res.json({ ok: !!r.ok, loja: req.loja.key, de, ate, resposta: r.data || null });
+  } catch (e) { return res.status(500).json({ ok: false, erro: String((e && e.message) || e) }); }
+});
+
+// LISTA DE ESCROW LIBERADO no periodo — e a tela "Minha Renda / Pedidos Completos".
+// Serve pra conciliar: o que a Shopee liberou x o que a gente tem gravado.
+app.get('/:loja/interno/escrow-liberado', resolverLoja, async (req, res) => {
+  if (!_shopeeAuthOk(req)) return res.status(401).json({ ok: false, erro: 'chave invalida - use a INTERNAL_KEY ou a ADMIN_KEY DESTE servico' });
+  const dias = Math.min(60, Math.max(1, Number(req.query.dias || 15)));
+  const de = _epoch(req.query.de, dias);
+  const ate = Number(req.query.ate) > 1000000000 ? Math.floor(Number(req.query.ate)) : Math.floor(Date.now() / 1000);
+  try {
+    const r = await shopee.shopeeApiCall(req.loja, '/api/v2/payment/get_escrow_list', 'GET', null,
+      `release_time_from=${de}&release_time_to=${ate}&page_no=${Math.max(1, Number(req.query.page || 1))}&page_size=${Math.min(100, Number(req.query.size || 40))}`);
+    return res.json({ ok: !!r.ok, loja: req.loja.key, de, ate, resposta: r.data || null });
+  } catch (e) { return res.status(500).json({ ok: false, erro: String((e && e.message) || e) }); }
+});
+
 // ── 05/08/2026: ESCROW POR PEDIDO (pro dashboard de margem da Girassol) ──────
 // O dashboard precisa da comissao e do frete REAIS da Shopee por pedido. A saida
 // obvia seria o dashboard falar direto com a Shopee — MAS o refresh_token da
