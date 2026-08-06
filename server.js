@@ -281,6 +281,11 @@ function _shopeeAuthOk(req) {
   const ok = [process.env.INTERNAL_KEY, process.env.ADMIN_KEY].filter(Boolean).map(s => String(s).trim());
   return ok.length && ok.some(cv => chave === cv || chave.replace(/ /g, '+') === cv);
 }
+// 06/08 — A SHOPEE SO ACEITA JANELA DE 15 DIAS nestes endpoints. A sonda de
+// devolucoes com dias=30 voltou: "The period between create_time_from and
+// created_time_of must not more than 15 days". Entao o teto passa a ser 15 aqui,
+// e quem quiser mais periodo pagina por janelas (de/ate explicitos).
+const MAX_DIAS_SHOPEE = 15;
 const _epoch = (v, padraoDias) => {
   const n = Number(v);
   if (isFinite(n) && n > 1000000000) return Math.floor(n);            // ja veio em epoch
@@ -291,7 +296,7 @@ const _epoch = (v, padraoDias) => {
 // Uso: /girassol/interno/carteira?dias=7&k=CHAVE   (ou &de=&ate= em epoch)
 app.get('/:loja/interno/carteira', resolverLoja, async (req, res) => {
   if (!_shopeeAuthOk(req)) return res.status(401).json({ ok: false, erro: 'chave invalida - use a INTERNAL_KEY ou a ADMIN_KEY DESTE servico' });
-  const dias = Math.min(60, Math.max(1, Number(req.query.dias || 7)));
+  const dias = Math.min(MAX_DIAS_SHOPEE, Math.max(1, Number(req.query.dias || 7)));
   const de = _epoch(req.query.de, dias);
   const ate = Number(req.query.ate) > 1000000000 ? Math.floor(Number(req.query.ate)) : Math.floor(Date.now() / 1000);
   const page = Math.max(1, Number(req.query.page || 1));
@@ -320,9 +325,10 @@ app.get('/:loja/interno/escrow-lote', resolverLoja, async (req, res) => {
 // justamente pra descobrirmos o formato sem chutar (foi assim que fechamos o escrow).
 app.get('/:loja/interno/devolucoes', resolverLoja, async (req, res) => {
   if (!_shopeeAuthOk(req)) return res.status(401).json({ ok: false, erro: 'chave invalida - use a INTERNAL_KEY ou a ADMIN_KEY DESTE servico' });
-  const dias = Math.min(60, Math.max(1, Number(req.query.dias || 30)));
+  const dias = Math.min(MAX_DIAS_SHOPEE, Math.max(1, Number(req.query.dias || 15)));
   const de = _epoch(req.query.de, dias);
-  const ate = Number(req.query.ate) > 1000000000 ? Math.floor(Number(req.query.ate)) : Math.floor(Date.now() / 1000);
+  let ate = Number(req.query.ate) > 1000000000 ? Math.floor(Number(req.query.ate)) : Math.floor(Date.now() / 1000);
+  if (ate - de > MAX_DIAS_SHOPEE * 86400) ate = de + MAX_DIAS_SHOPEE * 86400;   // a Shopee recusa janela maior
   const page = Math.max(0, Number(req.query.page || 0));
   try {
     const r = await shopee.shopeeApiCall(req.loja, '/api/v2/returns/get_return_list', 'GET', null,
@@ -335,7 +341,7 @@ app.get('/:loja/interno/devolucoes', resolverLoja, async (req, res) => {
 // Serve pra conciliar: o que a Shopee liberou x o que a gente tem gravado.
 app.get('/:loja/interno/escrow-liberado', resolverLoja, async (req, res) => {
   if (!_shopeeAuthOk(req)) return res.status(401).json({ ok: false, erro: 'chave invalida - use a INTERNAL_KEY ou a ADMIN_KEY DESTE servico' });
-  const dias = Math.min(60, Math.max(1, Number(req.query.dias || 15)));
+  const dias = Math.min(MAX_DIAS_SHOPEE, Math.max(1, Number(req.query.dias || 15)));
   const de = _epoch(req.query.de, dias);
   const ate = Number(req.query.ate) > 1000000000 ? Math.floor(Number(req.query.ate)) : Math.floor(Date.now() / 1000);
   try {
