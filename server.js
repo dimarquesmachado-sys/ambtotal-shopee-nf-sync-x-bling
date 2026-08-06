@@ -262,6 +262,30 @@ app.get('/debug-env', (req, res) => {
 // v2.2.2 - status do indice tracking (diagnostico rapido, NAO reconstroi).
 // Mostra por loja: se ja esta quente, idade, total de cancelados e quantos
 // tem rastreio. Serve pra medir o gargalo do pre-aquecimento.
+// ── 05/08/2026: ESCROW POR PEDIDO (pro dashboard de margem da Girassol) ──────
+// O dashboard precisa da comissao e do frete REAIS da Shopee por pedido. A saida
+// obvia seria o dashboard falar direto com a Shopee — MAS o refresh_token da
+// Shopee ROTACIONA a cada renovacao: dois servicos renovando o mesmo par se
+// invalidam, e isso derrubaria etiqueta e coleta, que e operacao critica diaria.
+// Entao o token continua com UM DONO SO (este servico) e o dashboard pede aqui.
+// Uso: GET /girassol/interno/escrow/260805H3QGT96R?k=INTERNAL_KEY
+// Devolve a resposta CRUA da Shopee — quem interpreta e o dashboard.
+app.get('/:loja/interno/escrow/:orderSn', resolverLoja, async (req, res) => {
+  const chave = req.headers['x-internal-key'] || req.query.k || '';
+  if (!process.env.INTERNAL_KEY || chave !== process.env.INTERNAL_KEY) {
+    return res.status(401).json({ ok: false, erro: 'chave interna invalida' });
+  }
+  const orderSn = String(req.params.orderSn || '').trim();
+  if (!orderSn) return res.status(400).json({ ok: false, erro: 'passe o order_sn na URL' });
+  try {
+    const r = await shopee.shopeeApiCall(req.loja, '/api/v2/payment/get_escrow_detail', 'GET', null,
+      `order_sn=${encodeURIComponent(orderSn)}`);
+    return res.json({ ok: !!r.ok, loja: req.loja.key, order_sn: orderSn, resposta: r.data || null });
+  } catch (e) {
+    return res.status(500).json({ ok: false, erro: String((e && e.message) || e) });
+  }
+});
+
 app.get('/:loja/interno/indice-status', resolverLoja, async (req, res) => {
   const chave = req.headers['x-internal-key'] || req.query.k || '';
   if (!process.env.INTERNAL_KEY || chave !== process.env.INTERNAL_KEY) {
