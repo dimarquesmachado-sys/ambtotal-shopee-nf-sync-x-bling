@@ -856,6 +856,66 @@ app.get('/:loja/interno/sonda-fbs', resolverLoja, async (req, res) => {
   res.json(out);
 });
 
+// =============================================================================
+// 10/08/2026: PEDIDOS DO DIA (pro dashboard de margem — "marketplace primeiro,
+// Bling é conferência"). Lista as vendas RECENTES direto da Shopee (create_time
+// nas últimas N horas) com valor, comprador e itens — o Mover-Pedidos usa isso
+// pra mostrar a venda NA HORA, antes de o XML do Full descer pro Bling.
+// Uso: GET /:loja/interno/pedidos-do-dia?k=INTERNAL_KEY[&horas=36]
+// =============================================================================
+app.get('/:loja/interno/pedidos-do-dia', resolverLoja, async (req, res) => {
+  const chaveD = String(req.headers['x-internal-key'] || req.query.k || '').trim();
+  const chavesOkD = [process.env.INTERNAL_KEY, process.env.ADMIN_KEY].filter(Boolean).map(s => String(s).trim());
+  const bateD = chavesOkD.some(cv => chaveD === cv || chaveD.replace(/ /g, '+') === cv);
+  if (!chavesOkD.length || !bateD) {
+    return res.status(401).json({ ok: false, erro: 'chave invalida - use a INTERNAL_KEY ou a ADMIN_KEY DESTE servico (ambtotal-shopee-nf-sync)' });
+  }
+  try {
+    const horas = Math.min(Math.max(parseInt(req.query.horas, 10) || 36, 1), 96);
+    const agoraD = Math.floor(Date.now() / 1000);
+    const iniD = agoraD - horas * 3600;
+    // 1) lista por create_time (com cursor)
+    const sns = [];
+    let cursorD = '';
+    for (let pg = 0; pg < 6; pg++) {
+      const rl = await shopee.shopeeApiCall(req.loja, '/api/v2/order/get_order_list', 'GET', null,
+        `time_range_field=create_time&time_from=${iniD}&time_to=${agoraD}&page_size=100${cursorD ? `&cursor=${encodeURIComponent(cursorD)}` : ''}`);
+      if (!rl.ok) break;
+      for (const o of (rl.data?.response?.order_list || [])) if (o && o.order_sn) sns.push(o.order_sn);
+      if (!rl.data?.response?.more) break;
+      cursorD = rl.data?.response?.next_cursor || '';
+      if (!cursorD) break;
+      await new Promise(s => setTimeout(s, 250));
+    }
+    // 2) detalhe em lotes de 50 — valor, comprador, hora e itens
+    const pedidos = [];
+    for (let i = 0; i < sns.length; i += 50) {
+      const lote = sns.slice(i, i + 50);
+      const rd = await shopee.shopeeApiCall(req.loja, '/api/v2/order/get_order_detail', 'GET', null,
+        `order_sn_list=${encodeURIComponent(lote.join(','))}&response_optional_fields=buyer_username,total_amount,item_list,create_time,order_status`);
+      for (const ped of (rd.ok ? (rd.data?.response?.order_list || []) : [])) {
+        if (!ped || !ped.order_sn) continue;
+        pedidos.push({
+          order_sn: ped.order_sn,
+          create_time: ped.create_time || null,
+          order_status: ped.order_status || null,
+          total: Number(ped.total_amount || 0),
+          buyer: ped.buyer_username || '',
+          itens: (ped.item_list || []).map(it => ({
+            sku: String(it.model_sku || it.item_sku || '').trim(),
+            qtd: Number(it.model_quantity_purchased != null ? it.model_quantity_purchased : (it.quantity_purchased || 1)),
+            valor: Number(it.model_discounted_price != null ? it.model_discounted_price : (it.model_original_price || 0))
+          }))
+        });
+      }
+      if (i + 50 < sns.length) await new Promise(s => setTimeout(s, 300));
+    }
+    res.json({ ok: true, loja: req.loja.key, horas, listados: sns.length, pedidos });
+  } catch (e) {
+    res.status(500).json({ ok: false, erro: String(e.message || e).slice(0, 200) });
+  }
+});
+
 app.get('/:loja/interno/margem-pedidos', resolverLoja, async (req, res) => {
   // v2.4.1 - aceita INTERNAL_KEY ou ADMIN_KEY deste servico; tolera espaco copiado
   // nas pontas e o classico '+' da chave que o navegador transforma em espaco no ?k=
