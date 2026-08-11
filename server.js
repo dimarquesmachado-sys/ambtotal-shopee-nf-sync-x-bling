@@ -871,7 +871,10 @@ app.get('/:loja/interno/pedidos-do-dia', resolverLoja, async (req, res) => {
     return res.status(401).json({ ok: false, erro: 'chave invalida - use a INTERNAL_KEY ou a ADMIN_KEY DESTE servico (ambtotal-shopee-nf-sync)' });
   }
   try {
-    const horas = Math.min(Math.max(parseInt(req.query.horas, 10) || 36, 1), 96);
+    // 11/08 (Codex PR#14): o teto era 96h, mas quem consome guarda provisórias por 6 DIAS —
+    // um pedido cancelado no 5º dia não aparecia na lista e a venda morta seguia no dashboard.
+    // 168h = 7 dias, cobre a retenção inteira com folga.
+    const horas = Math.min(Math.max(parseInt(req.query.horas, 10) || 36, 1), 168);
     const agoraD = Math.floor(Date.now() / 1000);
     const iniD = agoraD - horas * 3600;
     // 1) lista por create_time (com cursor)
