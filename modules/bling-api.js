@@ -75,7 +75,19 @@ async function buscarPedidoPorNumeroLoja(loja, orderSn) {
 
   const pedidos = data.data || [];
   if (pedidos.length === 0) return null;
-  return pedidos[0];
+  // 12/08 — CAUSA RAIZ das 29 DANFEs trocadas: quando o filtro numeroLoja nao casa
+  // (pedido ainda nao importado no Bling, ex. token Shopee vencido), o Bling NAO
+  // devolve lista vazia: devolve a lista geral, mais recente primeiro. Pegar
+  // pedidos[0] as cegas mandava a NF de OUTRO pedido (ate de outro canal) pro
+  // upload_invoice/ship_order, e a Shopee imprimia DANFE alheia na etiqueta.
+  // Agora exige casamento EXATO do numeroLoja; sem isso, trata como "sem pedido".
+  const alvo = String(orderSn).trim();
+  const exato = pedidos.find(p => String((p && p.numeroLoja) || '').trim() === alvo);
+  if (!exato) {
+    console.log(`[bling-api][${loja.key}] numeroLoja ${alvo}: Bling devolveu ${pedidos.length} pedido(s) e NENHUM bate — ignorado (evita NF de outro pedido)`);
+    return null;
+  }
+  return exato;
 }
 
 async function buscarPedidoDetalhes(loja, pedidoId) {
