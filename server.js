@@ -1244,11 +1244,14 @@ app.post('/:loja/sincronizar/:orderSn', resolverLoja, async (req, res) => {
   // Codex PR#4: a trava vale pras entradas MANUAIS tambem — senao um sync avulso
   // durante o lote de re-sync sobe a mesma NF duas vezes e suja o relatorio
   if (cicloRodando) return res.status(409).json({ erro: 'ciclo/lote rodando agora — tente de novo em 1-2 min' });
+  cicloRodando = true;   // Codex PR#4: SEGURA a trava, não só confere (senão o cron entra por baixo)
   try {
     const r = await engine.sincronizarPedido(req.loja.key, req.params.orderSn);
     res.json(r);
   } catch (e) {
     res.status(500).json({ erro: e.message });
+  } finally {
+    cicloRodando = false;
   }
 });
 
@@ -1256,12 +1259,15 @@ app.post('/:loja/sincronizar/:orderSn', resolverLoja, async (req, res) => {
 app.post('/sincronizar-ciclo', async (req, res) => {
   if (!adminOk(req)) return res.status(404).send('Not found'); // protegido: exige ?k=ADMIN_KEY
   if (cicloRodando) return res.status(409).json({ erro: 'ciclo/lote rodando agora — tente de novo em 1-2 min' });   // Codex PR#4
+  cicloRodando = true;   // Codex PR#4: segura a trava durante o ciclo manual inteiro
   try {
     const dryRun = req.body?.dryRun === true;
     const r = await engine.cicloTodasLojas({ dryRun });
     res.json(r);
   } catch (e) {
     res.status(500).json({ erro: e.message });
+  } finally {
+    cicloRodando = false;
   }
 });
 
