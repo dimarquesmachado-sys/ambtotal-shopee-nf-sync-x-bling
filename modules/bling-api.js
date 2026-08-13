@@ -64,16 +64,30 @@ async function blingFetch(loja, url, options = {}, tentativa = 1) {
   return response;
 }
 
-async function buscarPedidoPorNumeroLoja(loja, orderSn) {
-  const url = `${BLING_BASE}/pedidos/vendas?numeroLoja=${encodeURIComponent(orderSn)}&limite=10`;
-  const response = await blingFetch(loja, url);
-  const data = await response.json();
-
-  if (!response.ok) {
-    throw new Error(`[${loja.key}] Bling buscarPedidoPorNumeroLoja erro: ${JSON.stringify(data)}`);
+async function buscarPedidoPorNumeroLoja(loja, orderSn, opts = {}) {
+  // 13/08 — o filtro `numeroLoja` do Bling e IGNORADO: ele responde a lista geral
+  // (mais recentes primeiro). Pro fluxo do dia isso bastava, porque o pedido novo
+  // esta nas primeiras posicoes. Pro RE-SYNC de pedidos antigos nao: o de 09/08
+  // caia fora das 10 primeiras e voltava como "nao encontrado". Entao paginamos e
+  // so aceitamos casamento EXATO — o teto evita varrer o historico inteiro.
+  const maxPaginas = Number(opts.maxPaginas) || 1;
+  const porPagina = maxPaginas > 1 ? 100 : 10;
+  const alvoP = String(orderSn).trim();
+  let pedidos = [];
+  for (let pagina = 1; pagina <= maxPaginas; pagina++) {
+    const url = `${BLING_BASE}/pedidos/vendas?numeroLoja=${encodeURIComponent(orderSn)}&limite=${porPagina}&pagina=${pagina}`;
+    const response = await blingFetch(loja, url);
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(`[${loja.key}] Bling buscarPedidoPorNumeroLoja erro: ${JSON.stringify(data)}`);
+    }
+    const lote = data.data || [];
+    pedidos = pedidos.concat(lote);
+    const achouAqui = lote.find(p => String((p && p.numeroLoja) || '').trim() === alvoP);
+    if (achouAqui) return achouAqui;
+    if (lote.length < porPagina) break;   // acabou a lista
+    if (pagina < maxPaginas) await new Promise(r => setTimeout(r, 400));   // respiro do rate limit do Bling
   }
-
-  const pedidos = data.data || [];
   if (pedidos.length === 0) return null;
   // 12/08 — CAUSA RAIZ das 29 DANFEs trocadas: quando o filtro numeroLoja nao casa
   // (pedido ainda nao importado no Bling, ex. token Shopee vencido), o Bling NAO
