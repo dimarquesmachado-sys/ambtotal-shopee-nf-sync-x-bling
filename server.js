@@ -11,6 +11,10 @@ const fetch = require('node-fetch');
 const tokenManager = require('./modules/token-manager');
 const shopee = require('./modules/shopee-api');
 const engine = require('./modules/sync-engine');
+const bling = require('./modules/bling-api');
+
+// Trava unica: cron, lote de re-sync e syncs manuais nao rodam ao mesmo tempo (Codex PR#4)
+let cicloRodando = false;
 const log = require('./modules/supabase-log');
 const { getConfigLoja, lojasValidas, lojasConfiguradas, SHOPEE_BASE } = require('./modules/lojas');
 const fbsNf = require('./modules/fbs-nf');
@@ -1237,24 +1241,117 @@ app.get('/pendentes', async (req, res) => {
 // Sincroniza um pedido especifico de uma loja
 app.post('/:loja/sincronizar/:orderSn', resolverLoja, async (req, res) => {
   if (!adminOk(req)) return res.status(404).send('Not found'); // protegido: exige ?k=ADMIN_KEY
+  // Codex PR#4: a trava vale pras entradas MANUAIS tambem — senao um sync avulso
+  // durante o lote de re-sync sobe a mesma NF duas vezes e suja o relatorio
+  if (cicloRodando) return res.status(409).json({ erro: 'ciclo/lote rodando agora — tente de novo em 1-2 min' });
+  cicloRodando = true;   // Codex PR#4: SEGURA a trava, não só confere (senão o cron entra por baixo)
   try {
     const r = await engine.sincronizarPedido(req.loja.key, req.params.orderSn);
     res.json(r);
   } catch (e) {
     res.status(500).json({ erro: e.message });
+  } finally {
+    cicloRodando = false;
   }
 });
 
 // Roda ciclo completo de todas as lojas
 app.post('/sincronizar-ciclo', async (req, res) => {
   if (!adminOk(req)) return res.status(404).send('Not found'); // protegido: exige ?k=ADMIN_KEY
+  if (cicloRodando) return res.status(409).json({ erro: 'ciclo/lote rodando agora — tente de novo em 1-2 min' });   // Codex PR#4
+  cicloRodando = true;   // Codex PR#4: segura a trava durante o ciclo manual inteiro
   try {
     const dryRun = req.body?.dryRun === true;
     const r = await engine.cicloTodasLojas({ dryRun });
     res.json(r);
   } catch (e) {
     res.status(500).json({ erro: e.message });
+  } finally {
+    cicloRodando = false;
   }
+});
+
+// =============================================================================
+// RE-SYNC DA NF (12/08/2026) — conserto do estrago do bug do casamento:
+// no periodo em que buscarPedidoPorNumeroLoja devolvia pedidos[0] as cegas, o
+// upload_invoice subiu pra Shopee o XML de OUTRO cliente. Com o casamento exato
+// no ar, reprocessar o pedido manda a NF certa.
+//
+// E um GET de proposito: o Diego opera pelo NAVEGADOR (nao usa terminal), e a
+// rota irma /:loja/sincronizar/:orderSn so aceita POST. Roda em BACKGROUND
+// (35 pedidos x ~35s estouraria qualquer timeout de request) e responde na hora;
+// o progresso sai no mesmo endereco com &status=1.
+// =============================================================================
+// Trava compartilhada com o cron (declarada aqui porque a rota de re-sync abaixo
+// tambem a usa — Codex PR#4: sem isso o ciclo agendado de 5-10min processaria o
+// mesmo pedido no meio do lote, gerando upload duplicado e resultado nao confiavel).
+
+const _resync = { rodando: false, inicio: null, fim: null, total: 0, feitos: 0, trocadas: 0, recusadas: 0, falhas: 0, resultados: [] };
+
+// Troca a NF de UM pedido na Shopee. Diferente do processarPedido do engine:
+// (a) nao mexe em envio nenhum (os pedidos ja foram postados);
+// (b) recusa da Shopee ("already/duplicate/arranged") NAO e sucesso — vira
+//     'recusada_shopee', que e exatamente o caso que precisa de mao humana.
+async function trocarNfNaShopee(loja, orderSn) {
+  const pedido = await bling.buscarPedidoPorNumeroLoja(loja, orderSn);
+  if (!pedido) return { order_sn: orderSn, status: 'pedido_nao_encontrado_no_bling' };
+
+  const nfeId = await bling.buscarNfPorPedido(loja, pedido.id);
+  if (!nfeId) return { order_sn: orderSn, status: 'pedido_sem_nf_no_bling', pedido_bling_id: pedido.id };
+
+  const nf = await bling.baixarXmlAutorizado(loja, nfeId);
+  try {
+    await shopee.uploadInvoice(loja, orderSn, nf.xmlConteudo, nf.chave, nf.numero);
+  } catch (e) {
+    const msg = String(e.message || '');
+    if (/already|duplicat|arranged/i.test(msg)) {
+      return { order_sn: orderSn, status: 'recusada_shopee', nf_correta: nf.numero, detalhe: 'Shopee nao aceitou substituir — trocar no painel', erro: msg.slice(0, 180) };
+    }
+    return { order_sn: orderSn, status: 'erro_upload', nf_correta: nf.numero, detalhe: msg.slice(0, 180) };
+  }
+  await log.logSync({ order_sn: orderSn, loja: loja.key, pedido_bling_id: pedido.id, nfe_id: nfeId, chave_acesso: nf.chave, status: 'sucesso', etapa: 'resync_nf' });
+  return { order_sn: orderSn, status: 'nf_trocada', nf_correta: nf.numero, chave: nf.chave };
+}
+
+// GET de proposito: o operador usa o NAVEGADOR (a rota irma so aceita POST).
+// Roda em BACKGROUND e responde na hora; progresso com &status=1.
+app.get('/:loja/resync-nfs', resolverLoja, async (req, res) => {
+  if (!adminOk(req)) return res.status(404).send('Not found');
+
+  if (req.query.status) return res.json(_resync);
+  if (_resync.rodando) return res.json({ ok: true, ja_rodando: true, ..._resync });
+  if (cicloRodando) return res.status(409).json({ ok: false, erro: 'ciclo automatico rodando agora — tente de novo em 1-2 min' });
+
+  // Codex PR#4: order_sn repetido faria o 2o upload voltar como 'already' e o
+  // relatorio acusaria o MESMO pedido como trocado E precisando de mao humana
+  const sns = [...new Set(String(req.query.sns || '').split(',').map(s => s.trim()).filter(Boolean))];
+  if (!sns.length) return res.status(400).json({ ok: false, erro: 'use ?sns=ORDER_SN1,ORDER_SN2,...&k=ADMIN_KEY' });
+  if (sns.length > 100) return res.status(400).json({ ok: false, erro: `maximo 100 por vez (recebi ${sns.length})` });
+
+  const lojaKey = req.loja.key;
+  Object.assign(_resync, { rodando: true, inicio: new Date().toISOString(), fim: null, total: sns.length, feitos: 0, trocadas: 0, recusadas: 0, falhas: 0, resultados: [], loja: lojaKey });
+  cicloRodando = true;   // segura o cron enquanto o lote roda
+
+  (async () => {
+    for (const sn of sns) {
+      let linha;
+      try {
+        linha = await trocarNfNaShopee(getConfigLoja(lojaKey), sn);
+      } catch (e) {
+        linha = { order_sn: sn, status: 'erro', detalhe: String(e.message || e).slice(0, 200) };
+      }
+      if (linha.status === 'nf_trocada') _resync.trocadas++;
+      else if (linha.status === 'recusada_shopee') _resync.recusadas++;
+      else _resync.falhas++;
+      _resync.resultados.push(linha);
+      _resync.feitos++;
+      await new Promise(r => setTimeout(r, 1500));
+    }
+    console.log(`[resync-nfs][${lojaKey}] fim — ${_resync.trocadas} trocada(s), ${_resync.recusadas} recusada(s), ${_resync.falhas} falha(s) de ${_resync.total}`);
+  })().catch(e => { _resync.erro_fatal = String(e.message || e).slice(0, 200); })
+    .finally(() => { _resync.rodando = false; _resync.fim = new Date().toISOString(); cicloRodando = false; });
+
+  res.json({ ok: true, iniciado: true, total: sns.length, loja: lojaKey, acompanhe: `/${lojaKey}/resync-nfs?status=1&k=SUA_ADMIN_KEY` });
 });
 
 app.get('/logs', async (req, res) => {
@@ -1274,8 +1371,6 @@ app.get('/logs', async (req, res) => {
 
 // Trava simples: evita que dois disparos rodem o ciclo ao mesmo tempo
 // (importante porque os dois agendamentos se sobrepoem em alguns minutos).
-let cicloRodando = false;
-
 async function dispararCiclo(origem) {
   if (cicloRodando) {
     console.log(`[cron][${origem}] Ciclo anterior ainda rodando, pulando este disparo`);
