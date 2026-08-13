@@ -1257,6 +1257,57 @@ app.post('/sincronizar-ciclo', async (req, res) => {
   }
 });
 
+// =============================================================================
+// RE-SYNC DA NF (12/08/2026) — conserto do estrago do bug do casamento:
+// no periodo em que buscarPedidoPorNumeroLoja devolvia pedidos[0] as cegas, o
+// upload_invoice subiu pra Shopee o XML de OUTRO cliente. Com o casamento exato
+// no ar, reprocessar o pedido manda a NF certa.
+//
+// E um GET de proposito: o Diego opera pelo NAVEGADOR (nao usa terminal), e a
+// rota irma /:loja/sincronizar/:orderSn so aceita POST. Roda em BACKGROUND
+// (35 pedidos x ~35s estouraria qualquer timeout de request) e responde na hora;
+// o progresso sai no mesmo endereco com &status=1.
+// =============================================================================
+const _resync = { rodando: false, inicio: null, fim: null, total: 0, feitos: 0, ok: 0, falhas: 0, resultados: [] };
+
+app.get('/:loja/resync-nfs', resolverLoja, async (req, res) => {
+  if (!adminOk(req)) return res.status(404).send('Not found');
+
+  if (req.query.status) return res.json(_resync);
+  if (_resync.rodando) return res.json({ ok: true, ja_rodando: true, ..._resync });
+
+  const sns = String(req.query.sns || '').split(',').map(s => s.trim()).filter(Boolean);
+  if (!sns.length) return res.status(400).json({ ok: false, erro: 'use ?sns=ORDER_SN1,ORDER_SN2,...&k=ADMIN_KEY' });
+  if (sns.length > 100) return res.status(400).json({ ok: false, erro: `maximo 100 por vez (recebi ${sns.length})` });
+
+  const lojaKey = req.loja.key;
+  Object.assign(_resync, { rodando: true, inicio: new Date().toISOString(), fim: null, total: sns.length, feitos: 0, ok: 0, falhas: 0, resultados: [], loja: lojaKey });
+
+  // dispara em background e responde imediatamente
+  (async () => {
+    for (const sn of sns) {
+      let linha;
+      try {
+        const r = await engine.processarPedido(getConfigLoja(lojaKey), sn);
+        const sucesso = r && r.status === 'sucesso';
+        linha = { order_sn: sn, status: (r && r.status) || 'sem_resposta', detalhe: (r && r.detalhe) || null, nf: (r && r.chave) || null };
+        if (sucesso) _resync.ok++; else _resync.falhas++;
+      } catch (e) {
+        linha = { order_sn: sn, status: 'erro', detalhe: String(e.message || e).slice(0, 200) };
+        _resync.falhas++;
+      }
+      _resync.resultados.push(linha);
+      _resync.feitos++;
+      await new Promise(r => setTimeout(r, 1500));   // respiro entre pedidos (rate limit Shopee/Bling)
+    }
+    _resync.rodando = false;
+    _resync.fim = new Date().toISOString();
+    console.log(`[resync-nfs][${lojaKey}] fim — ${_resync.ok} ok, ${_resync.falhas} falha(s) de ${_resync.total}`);
+  })().catch(e => { _resync.rodando = false; _resync.fim = new Date().toISOString(); _resync.erro_fatal = String(e.message || e).slice(0, 200); });
+
+  res.json({ ok: true, iniciado: true, total: sns.length, loja: lojaKey, acompanhe: `/${lojaKey}/resync-nfs?status=1&k=SUA_ADMIN_KEY` });
+});
+
 app.get('/logs', async (req, res) => {
   if (!adminOk(req)) return res.status(404).send('Not found'); // protegido: exige ?k=ADMIN_KEY
   try {
