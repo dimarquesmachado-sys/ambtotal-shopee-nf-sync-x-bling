@@ -1293,8 +1293,10 @@ const _resync = { rodando: false, inicio: null, fim: null, total: 0, feitos: 0, 
 // (b) recusa da Shopee ("already/duplicate/arranged") NAO e sucesso — vira
 //     'recusada_shopee', que e exatamente o caso que precisa de mao humana.
 async function trocarNfNaShopee(loja, orderSn) {
-  const pedido = await bling.buscarPedidoPorNumeroLoja(loja, orderSn);
-  if (!pedido) return { order_sn: orderSn, status: 'pedido_nao_encontrado_no_bling' };
+  // pedidos ANTIGOS (o caso deste conserto) nao aparecem nas 10 primeiras da lista
+  // que o Bling devolve — aqui vale varrer varias paginas ate achar o casamento exato
+  const pedido = await bling.buscarPedidoPorNumeroLoja(loja, orderSn, { maxPaginas: 12 });
+  if (!pedido) return { order_sn: orderSn, status: 'pedido_nao_encontrado_no_bling', detalhe: 'nao achei esse order_sn nas ultimas ~1200 vendas do Bling' };
 
   const nfeId = await bling.buscarNfPorPedido(loja, pedido.id);
   if (!nfeId) return { order_sn: orderSn, status: 'pedido_sem_nf_no_bling', pedido_bling_id: pedido.id };
