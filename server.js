@@ -327,7 +327,24 @@ app.get('/:loja/interno/escrow-lote', resolverLoja, async (req, res) => {
 // DEVOLUCOES — a devolucao e o custo dela.
 // ⚠️ Os parametros deste dominio eu NAO confirmei na doc; a rota devolve o cru
 // justamente pra descobrirmos o formato sem chutar (foi assim que fechamos o escrow).
-app.get('/:loja/interno/devolucoes', resolverLoja, async (req, res) => {
+// ⚠️ ROTA DE DIAGNOSTICO — MESMO CAMINHO da rota principal, que fica mais
+// abaixo neste arquivo. Ela nasceu em 06/08/2026 e foi declarada ACIMA da
+// original: no Express a PRIMEIRA vence, entao ela passou a atender TODAS as
+// chamadas de /{loja}/interno/devolucoes e a principal virou codigo morto.
+//
+// O estrago, medido em 28/08 na GOOD: esta rota devolve a resposta CRUA
+// ({ok, loja, de, ate, resposta}) e NAO tem o campo `devolucoes`. O painel de
+// Devolucoes le `d.devolucoes`, recebia undefined, e caia pra lista vazia SEM
+// ERRO — a tela dizia "lista com 0 devolucoes" e nenhuma etiqueta Shopee
+// casava. Falha silenciosa nas TRES empresas, nao so na GOOD.
+// Tambem engolia ?procurar=, ?tracking= e ?pedido=, que sao da rota de baixo:
+// os diagnosticos respondiam a lista crua da janela, ignorando o parametro.
+//
+// Conserto: so atende quando pedirem explicitamente ?cru=1. Sem isso, passa
+// adiante e a rota principal responde, como era antes de 06/08. O caminho
+// continua existindo pra quem usa o modo cru — agora sem sequestrar o resto.
+app.get('/:loja/interno/devolucoes', resolverLoja, async (req, res, next) => {
+  if (req.query.cru !== '1') return next();
   if (!_shopeeAuthOk(req)) return res.status(401).json({ ok: false, erro: 'chave invalida - use a INTERNAL_KEY ou a ADMIN_KEY DESTE servico' });
   const dias = Math.min(MAX_DIAS_SHOPEE, Math.max(1, Number(req.query.dias || 15)));
   const de = _epoch(req.query.de, dias);
