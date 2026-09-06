@@ -57,26 +57,52 @@ function listarPendentes(loja, tipo) {
   };
 }
 
-/* Uma chave no Bling. Devolve sempre um objeto com `verificada`; nunca lança. */
+/* Uma chave no Bling. Devolve sempre um objeto com `verificada`; nunca lança.
+   Codex #7 (P1): a LISTA do /nfe é representação resumida e pode vir SEM
+   chaveAcesso — comparar contra ela classificaria nota existente como ausente.
+   Então: o filtro só APONTA candidatos; a confirmação é sempre pelo DETALHE
+   (/nfe/{id}), que traz a chave. E se o detalhe do candidato trouxer OUTRA
+   chave, o filtro foi ignorado pelo Bling (a armadilha do ?numeroLoja de
+   06/09) — isso vira `verificada:false`, nunca "ausente".
+   Codex #7 (P2): cada chamada tem teto de 20s — lookup pendurado vira erro,
+   não trava o raio-x inteiro. */
+const TIMEOUT_MS = 20000;
+function _opTimeout() {
+  const opts = { timeout: TIMEOUT_MS };
+  try { if (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) opts.signal = AbortSignal.timeout(TIMEOUT_MS); } catch (e) {}
+  return opts;
+}
 async function conferirNoBling(loja, chave, blingFetchFn, BLING_BASE) {
-  const url = `${BLING_BASE}/nfe?chaveAcesso=${chave}`;
   try {
-    const r = await blingFetchFn(loja, url);
+    const r = await blingFetchFn(loja, `${BLING_BASE}/nfe?chaveAcesso=${chave}`, _opTimeout());
     if (!r.ok) return { verificada: false, erro: 'HTTP ' + r.status };
     let corpo = null;
     try { corpo = await r.json(); } catch (e) {
-      return { verificada: false, erro: 'corpo não-JSON do Bling' };
+      return { verificada: false, erro: 'corpo não-JSON do Bling (lista)' };
     }
     const arr = (corpo && Array.isArray(corpo.data)) ? corpo.data : [];
-    const nota = arr.find(n => n && String(n.chaveAcesso || '') === chave) || null;
-    if (!nota) return { verificada: true, esta_no_bling: false };
-    return {
-      verificada: true, esta_no_bling: true,
-      id: nota.id != null ? nota.id : null,
-      numero_bling: nota.numero != null ? String(nota.numero) : null,
-      serie_bling: nota.serie != null ? String(nota.serie) : null,
-      situacao: nota.situacao != null ? nota.situacao : null,
-    };
+    if (!arr.length) return { verificada: true, esta_no_bling: false };
+
+    // confirma pelo DETALHE — no máximo 3 candidatos (o filtro por chave deveria devolver 1)
+    for (const cand of arr.slice(0, 3)) {
+      if (!cand || cand.id == null) continue;
+      const rd = await blingFetchFn(loja, `${BLING_BASE}/nfe/${cand.id}`, _opTimeout());
+      if (!rd.ok) return { verificada: false, erro: 'detalhe ' + cand.id + ' HTTP ' + rd.status };
+      let det = null;
+      try { const j = await rd.json(); det = j && j.data; } catch (e) {
+        return { verificada: false, erro: 'corpo não-JSON do Bling (detalhe)' };
+      }
+      if (det && String(det.chaveAcesso || '') === chave) {
+        return {
+          verificada: true, esta_no_bling: true,
+          id: det.id != null ? det.id : cand.id,
+          numero_bling: det.numero != null ? String(det.numero) : null,
+          serie_bling: det.serie != null ? String(det.serie) : null,
+          situacao: det.situacao != null ? det.situacao : null,
+        };
+      }
+    }
+    return { verificada: false, erro: 'filtro chaveAcesso ignorado pelo Bling (candidato com outra chave) — sem como verificar por aqui' };
   } catch (e) {
     return { verificada: false, erro: String(e.message || e).slice(0, 160) };
   }
@@ -90,13 +116,22 @@ async function raioX(loja, opts = {}) {
   const blingFetchFn = opts.blingFetchFn || blingApi.blingFetch;
   const BLING_BASE = opts.BLING_BASE || (blingApi && blingApi.BLING_BASE) || 'https://api.bling.com.br/Api/v3';
 
+  const pular = Math.max(0, Number(opts.pular) || 0);
+
   const p = listarFn(loja, tipo);
   if (!p.arquivo) {
     return { ok: true, loja: loja.key, tipo, veredito: 'SEM_ZIP', detalhe: 'nenhum arquivo baixado ainda — rode /fbs/rodar ou espere o cron', varredura_completa: true, linhas: [] };
   }
+  /* Codex #7 (P2): tudo já marcado NÃO é evidência de nada — é o estado em dia.
+     Sem pendentes não há o que a extensão re-tente, então nenhum veredito causal. */
+  if (!p.pendentes.length) {
+    return { ok: true, loja: loja.key, tipo, arquivo: p.arquivo, total_no_zip: p.total_no_zip, ja_marcadas: p.ja_marcadas, marcadas_em: p.quando_marcou, pendentes: 0, veredito: 'SEM_PENDENTES', detalhe: 'todas as chaves do ZIP já estão marcadas como importadas — nada a re-tentar', varredura_completa: true, linhas: [] };
+  }
 
-  const olhar = p.pendentes.slice(0, limite);
-  const cortadas = p.pendentes.length - olhar.length;
+  /* Codex #7 (P2): &pular= permite varrer além do teto de 200 em fatias —
+     sem ele, loja com mais pendentes que o limite nunca fecharia veredito. */
+  const olhar = p.pendentes.slice(pular, pular + limite);
+  const cortadas = p.pendentes.length - pular - olhar.length;
 
   const linhas = [];
   let noBling = 0, fora = 0, comErro = 0;
@@ -109,7 +144,7 @@ async function raioX(loja, opts = {}) {
     linhas.push(Object.assign({ chave, serie: dec.serie, numero: dec.numero }, r));
   }
 
-  const varreduraCompleta = cortadas === 0 && comErro === 0;
+  const varreduraCompleta = cortadas <= 0 && pular === 0 && comErro === 0;
   let veredito, detalhe;
   if (!varreduraCompleta) {
     veredito = 'INDETERMINADO';
@@ -117,7 +152,7 @@ async function raioX(loja, opts = {}) {
       + (comErro ? ' (' + comErro + ' consultas falharam)' : '')
       + (cortadas ? ' (' + cortadas + ' além do limite=' + limite + ')' : '')
       + ' — sem veredito sobre varredura incompleta; rode de novo'
-      + (cortadas ? ' com &limite=' + p.pendentes.length : '');
+      + (cortadas > 0 ? '; próxima fatia: &pular=' + (pular + olhar.length) + '&limite=' + limite : '');
   } else if (fora === 0) {
     veredito = 'TODAS_AS_PENDENTES_JA_ESTAO_NO_BLING';
     detalhe = 'as ' + noBling + ' notas que a extensão re-tenta JÁ existem no Bling — o Bling deduplicou; '
@@ -138,6 +173,7 @@ async function raioX(loja, opts = {}) {
     ja_marcadas: p.ja_marcadas,
     marcadas_em: p.quando_marcou,
     pendentes: p.pendentes.length,
+    pulei: pular || undefined,
     verificadas: noBling + fora,
     ja_estao_no_bling: noBling,
     fora_do_bling: fora,
