@@ -215,6 +215,7 @@ async function baixarXmlAutorizado(loja, nfeId) {
 }
 
 module.exports = {
+  BLING_BASE,
   buscarPedidoPorNumeroLoja,
   buscarPedidoDetalhes,
   buscarNfPorPedido,
