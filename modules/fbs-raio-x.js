@@ -16,15 +16,17 @@
      conta como "fora do Bling";
    - só leitura: nada é marcado, nada é buscado na Shopee, nada muda de estado.
 
-   Interpretação dos dois desfechos completos:
-   - todas as pendentes JÁ estão no Bling  → o Bling deduplicou; o furo é só a
-     contabilidade da extensão (duplicada contada como falha ⇒ nunca marca ⇒
-     re-tenta pra sempre). Conserto vai na toolbox, em PR próprio.
-   - alguma pendente NÃO está no Bling     → falha real de importação, com chave,
-     série e número na mão pra caçar (inclui conferir se as vendas sem margem do
-     dashboard estão entre elas).
+   Interpretação dos dois desfechos completos (SÓ o que o dado sustenta):
+   - todas as pendentes JÁ estão no Bling  → nada falta importar; sobre o PORQUÊ
+     de seguirem pendentes há duas leituras (dupla contagem na extensão OU
+     importação por fora sem marcar) e este raio-x não separa as duas sozinho.
+   - alguma pendente NÃO está no Bling     → está faltando mesmo; se por falha
+     de importação ou por ainda não ter sido tentada (ZIP recém-gerado), a idade
+     do arquivo × marcadas_em ajuda a ler.
    ════════════════════════════════════════════════════════════════════════════════ */
 
+const fs = require('fs');
+const path = require('path');
 const fbsNf = require('./fbs-nf');
 
 /* Campos embutidos na chave de acesso (layout NF-e):
@@ -44,12 +46,15 @@ function decodificarChave(chave) {
 function listarPendentes(loja, tipo) {
   const st = fbsNf.estadoAtual(loja);
   const arquivo = tipo === 'entrada' ? st.arquivo_entrada : st.arquivo_saida;
-  if (!arquivo) return { arquivo: null, total_no_zip: 0, ja_marcadas: 0, pendentes: [], quando_marcou: null };
+  if (!arquivo) return { arquivo: null, arquivo_gerado_em: null, total_no_zip: 0, ja_marcadas: 0, pendentes: [], quando_marcou: null };
   const chaves = fbsNf.chavesDoZip(arquivo).filter(Boolean);
   const imp = fbsNf.lerImportadas(loja.key);
   const ja = new Set(imp[tipo] || []);
+  let geradoEm = null;
+  try { geradoEm = fs.statSync(path.join(fbsNf.NF_DIR, arquivo)).mtime.toISOString(); } catch (e) {}
   return {
     arquivo,
+    arquivo_gerado_em: geradoEm,
     total_no_zip: chaves.length,
     ja_marcadas: chaves.filter(c => ja.has(c)).length,
     pendentes: chaves.filter(c => !ja.has(c)),
@@ -116,21 +121,34 @@ async function raioX(loja, opts = {}) {
   const blingFetchFn = opts.blingFetchFn || blingApi.blingFetch;
   const BLING_BASE = opts.BLING_BASE || (blingApi && blingApi.BLING_BASE) || 'https://api.bling.com.br/Api/v3';
 
-  const pular = Math.max(0, Number(opts.pular) || 0);
+  const tudo = opts.tudo === true || opts.tudo === 1 || opts.tudo === '1';
+  const pular = tudo ? 0 : Math.max(0, Number(opts.pular) || 0);
 
   const p = listarFn(loja, tipo);
   if (!p.arquivo) {
     return { ok: true, loja: loja.key, tipo, veredito: 'SEM_ZIP', detalhe: 'nenhum arquivo baixado ainda — rode /fbs/rodar ou espere o cron', varredura_completa: true, linhas: [] };
   }
+  /* Codex #7 r2: ZIP presente mas SEM chave legível não é "tudo em dia" — o
+     chavesDoZip engole falha de leitura e devolve []; sem esta guarda, um ZIP
+     corrompido/truncado viraria SEM_PENDENTES afirmando o que ninguém leu. */
+  if (!p.total_no_zip) {
+    return { ok: true, loja: loja.key, tipo, arquivo: p.arquivo, arquivo_gerado_em: p.arquivo_gerado_em, total_no_zip: 0, veredito: 'ZIP_SEM_CHAVES_LEGIVEIS', detalhe: 'o arquivo existe mas nenhuma chave foi lida dele — ZIP corrompido, truncado ou sem XMLs; rode /fbs/rodar pra gerar outro e repita o raio-x', varredura_completa: false, linhas: [] };
+  }
+
   /* Codex #7 (P2): tudo já marcado NÃO é evidência de nada — é o estado em dia.
      Sem pendentes não há o que a extensão re-tente, então nenhum veredito causal. */
   if (!p.pendentes.length) {
-    return { ok: true, loja: loja.key, tipo, arquivo: p.arquivo, total_no_zip: p.total_no_zip, ja_marcadas: p.ja_marcadas, marcadas_em: p.quando_marcou, pendentes: 0, veredito: 'SEM_PENDENTES', detalhe: 'todas as chaves do ZIP já estão marcadas como importadas — nada a re-tentar', varredura_completa: true, linhas: [] };
+    return { ok: true, loja: loja.key, tipo, arquivo: p.arquivo, total_no_zip: p.total_no_zip, ja_marcadas: p.ja_marcadas, marcadas_em: p.quando_marcou, arquivo_gerado_em: p.arquivo_gerado_em, pendentes: 0, veredito: 'SEM_PENDENTES', detalhe: 'todas as chaves do ZIP já estão marcadas como importadas — nada a re-tentar', varredura_completa: true, linhas: [] };
   }
 
-  /* Codex #7 (P2): &pular= permite varrer além do teto de 200 em fatias —
-     sem ele, loja com mais pendentes que o limite nunca fecharia veredito. */
-  const olhar = p.pendentes.slice(pular, pular + limite);
+  /* Codex #7 r2: fatia (&pular=) serve pra OLHAR linhas; quem FECHA veredito é
+     &tudo=1, que varre todas as pendentes numa tacada só (com o throttle da
+     casa). Teto de sanidade de 1000 protege a cota — um ZIP do Full não chega
+     perto disso; se chegar, o problema é outro e merece olho antes de gastar. */
+  if (tudo && p.pendentes.length > 1000) {
+    return { ok: true, loja: loja.key, tipo, arquivo: p.arquivo, arquivo_gerado_em: p.arquivo_gerado_em, total_no_zip: p.total_no_zip, ja_marcadas: p.ja_marcadas, marcadas_em: p.quando_marcou, pendentes: p.pendentes.length, veredito: 'INDETERMINADO', detalhe: 'tudo=1 recusado: ' + p.pendentes.length + ' pendentes passam do teto de sanidade (1000) — antes de gastar cota, vale entender por que o ZIP está desse tamanho', varredura_completa: false, linhas: [] };
+  }
+  const olhar = tudo ? p.pendentes.slice(0) : p.pendentes.slice(pular, pular + limite);
   const cortadas = p.pendentes.length - pular - olhar.length;
 
   const linhas = [];
@@ -145,23 +163,26 @@ async function raioX(loja, opts = {}) {
   }
 
   const varreduraCompleta = cortadas <= 0 && pular === 0 && comErro === 0;
-  let veredito, detalhe;
+  let veredito, detalhe, leiturasPossiveis;
   if (!varreduraCompleta) {
     veredito = 'INDETERMINADO';
     detalhe = 'verifiquei ' + (noBling + fora) + ' de ' + p.pendentes.length + ' pendentes'
       + (comErro ? ' (' + comErro + ' consultas falharam)' : '')
       + (cortadas ? ' (' + cortadas + ' além do limite=' + limite + ')' : '')
       + ' — sem veredito sobre varredura incompleta; rode de novo'
-      + (cortadas > 0 ? '; próxima fatia: &pular=' + (pular + olhar.length) + '&limite=' + limite : '');
+      + (cortadas > 0 ? '. Pra fechar veredito numa tacada: &tudo=1 (' + p.pendentes.length + ' consultas ao Bling). Pra só OLHAR a próxima fatia: &pular=' + (pular + olhar.length) + '&limite=' + limite : '');
   } else if (fora === 0) {
     veredito = 'TODAS_AS_PENDENTES_JA_ESTAO_NO_BLING';
-    detalhe = 'as ' + noBling + ' notas que a extensão re-tenta JÁ existem no Bling — o Bling deduplicou; '
-      + 'o furo é a contabilidade da extensão (duplicada contada como não-importada nunca é marcada). '
-      + 'Conserto vai na toolbox (ct-nf.js), não aqui.';
+    detalhe = 'as ' + noBling + ' notas que este servidor considera pendentes JÁ existem no Bling — nada falta importar. '
+      + 'Por que seguem pendentes, o dado daqui não separa: pode ser a extensão contando duplicada como falha '
+      + '(e por isso nunca marcando), ou importação feita por fora (painel/manual) sem marcar. '
+      + 'O corpo da resposta do Bling na próxima abertura separa as duas; nas duas, marcar estas chaves (/fbs/confirmar) encerra o re-envio.';
+    leiturasPossiveis = ['extensao_contou_duplicada_como_falha_e_nao_marcou', 'importacao_por_fora_sem_marcar_no_servidor'];
   } else {
     veredito = 'HA_NOTAS_REALMENTE_FORA_DO_BLING';
-    detalhe = fora + ' de ' + (noBling + fora) + ' pendentes NÃO estão no Bling — falha real de importação; '
-      + 'as linhas com esta_no_bling=false trazem chave, série e número pra caçar.';
+    detalhe = fora + ' de ' + (noBling + fora) + ' pendentes NÃO estão no Bling — importação que FALHOU ou que AINDA NÃO FOI TENTADA '
+      + '(o _importado só marca sucesso confirmado; ZIP recém-gerado pelo cron fica assim até alguém abrir o Bling). '
+      + 'Compare arquivo_gerado_em com marcadas_em pra ler o caso; as linhas com esta_no_bling=false trazem chave, série e número.';
   }
 
   return {
@@ -169,11 +190,14 @@ async function raioX(loja, opts = {}) {
     loja: loja.key,
     tipo,
     arquivo: p.arquivo,
+    arquivo_gerado_em: p.arquivo_gerado_em,
     total_no_zip: p.total_no_zip,
     ja_marcadas: p.ja_marcadas,
     marcadas_em: p.quando_marcou,
     pendentes: p.pendentes.length,
+    tudo: tudo || undefined,
     pulei: pular || undefined,
+    leituras_possiveis: leiturasPossiveis,
     verificadas: noBling + fora,
     ja_estao_no_bling: noBling,
     fora_do_bling: fora,

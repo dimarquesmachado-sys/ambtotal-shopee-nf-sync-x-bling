@@ -199,7 +199,7 @@ app.get('/:loja/fbs/ext/registrar', resolverLoja, (req, res) => {
 app.get('/:loja/fbs/raio-x', resolverLoja, async (req, res) => {
   if (!fbsAuthOk(req)) return res.status(401).json({ ok: false, erro: 'chave invalida' });
   try {
-    const r = await fbsRaioX.raioX(req.loja, { tipo: String(req.query.tipo || 'saida'), limite: req.query.limite, pular: req.query.pular });
+    const r = await fbsRaioX.raioX(req.loja, { tipo: String(req.query.tipo || 'saida'), limite: req.query.limite, pular: req.query.pular, tudo: req.query.tudo });
     res.json(r);
   } catch (e) { res.status(500).json({ ok: false, erro: String(e.message || e) }); }
 });

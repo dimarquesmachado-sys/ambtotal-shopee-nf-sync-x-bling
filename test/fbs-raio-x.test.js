@@ -102,6 +102,25 @@ function blingQueTem(chavesQueTem) {
   ok(r.verificadas === 2 && r.pulei === 1 && r.linhas[0].chave === CH(2), 'cenario 9: pular avanca a fatia');
   ok(r.veredito === 'INDETERMINADO' && r.varredura_completa === false, 'cenario 9: fatia ⇒ INDETERMINADO');
 
-  console.log(falhas ? ('\nFALHOU: ' + falhas + ' verificacao(oes)') : '\nTUDO OK — raio-x honesto nos 9 cenarios');
+  // 10) neutralidade causal (Codex r2): os textos afirmam SÓ o que o dado sustenta
+  r = await raioX(LOJA, { listarPendentesFn: lista([CH(1)]), blingFetchFn: blingQueTem([CH(1)]), BLING_BASE: 'x' });
+  ok(Array.isArray(r.leituras_possiveis) && r.leituras_possiveis.length === 2, 'cenario 10: TODAS traz as 2 leituras possiveis');
+  ok(!/o furo é a contabilidade/.test(r.detalhe), 'cenario 10: TODAS sem afirmacao causal unica');
+  r = await raioX(LOJA, { listarPendentesFn: lista([CH(1)]), blingFetchFn: blingQueTem([]), BLING_BASE: 'x' });
+  ok(/AINDA NÃO FOI TENTADA/.test(r.detalhe) && !/falha real de importação/.test(r.detalhe), 'cenario 10: FORA admite nao-tentada');
+
+  // 11) ZIP presente mas ilegivel (0 chaves) ≠ tudo em dia — e nao toca o Bling
+  chamadas = 0;
+  const contando = async (l, u, o) => { chamadas++; return blingQueTem([])(l, u, o); };
+  r = await raioX(LOJA, { listarPendentesFn: () => ({ arquivo: 'amb-saida-atual.zip', arquivo_gerado_em: '2026-09-06T10:00:00Z', total_no_zip: 0, ja_marcadas: 0, pendentes: [], quando_marcou: null }), blingFetchFn: contando, BLING_BASE: 'x' });
+  ok(r.veredito === 'ZIP_SEM_CHAVES_LEGIVEIS' && r.varredura_completa === false && chamadas === 0, 'cenario 11: ZIP ilegivel nao vira SEM_PENDENTES');
+
+  // 12) &tudo=1 fecha veredito acima do limite (o que fatia nenhuma consegue)
+  r = await raioX(LOJA, { limite: 1, tudo: '1', listarPendentesFn: lista([CH(1), CH(2), CH(3)]), blingFetchFn: blingQueTem([CH(1), CH(2), CH(3)]), BLING_BASE: 'x' });
+  ok(r.verificadas === 3 && r.varredura_completa === true && r.veredito === 'TODAS_AS_PENDENTES_JA_ESTAO_NO_BLING', 'cenario 12: tudo=1 varre alem do limite e FECHA veredito');
+  r = await raioX(LOJA, { limite: 2, listarPendentesFn: lista([CH(1), CH(2), CH(3)]), blingFetchFn: blingQueTem([CH(1), CH(2), CH(3)]), BLING_BASE: 'x' });
+  ok(/tudo=1/.test(r.detalhe), 'cenario 12: o corte aponta o &tudo=1 como caminho do veredito');
+
+  console.log(falhas ? ('\nFALHOU: ' + falhas + ' verificacao(oes)') : '\nTUDO OK — raio-x honesto nos 12 cenarios');
   process.exit(falhas ? 1 : 0);
 })().catch(e => { console.error('ERRO NO TESTE:', e.message); process.exit(1); });
