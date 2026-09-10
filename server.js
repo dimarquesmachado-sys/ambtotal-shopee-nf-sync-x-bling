@@ -1277,7 +1277,7 @@ app.get('/:loja/sincronizar/:orderSn', resolverLoja, async (req, res) => {
   if (cicloRodando) return res.status(409).json({ erro: 'ciclo/lote rodando agora — tente de novo em 1-2 min' });
   cicloRodando = true;
   try {
-    const r = await engine.sincronizarPedido(req.loja.key, req.params.orderSn);
+    const r = await engine.sincronizarPedido(req.loja.key, req.params.orderSn, { maxPaginas: 12 });
     res.json(r);
   } catch (e) {
     res.status(500).json({ erro: e.message });
@@ -1291,7 +1291,7 @@ app.post('/:loja/sincronizar/:orderSn', resolverLoja, async (req, res) => {
   if (cicloRodando) return res.status(409).json({ erro: 'ciclo/lote rodando agora — tente de novo em 1-2 min' });
   cicloRodando = true;   // Codex PR#4: SEGURA a trava, não só confere (senão o cron entra por baixo)
   try {
-    const r = await engine.sincronizarPedido(req.loja.key, req.params.orderSn);
+    const r = await engine.sincronizarPedido(req.loja.key, req.params.orderSn, { maxPaginas: 12 });
     res.json(r);
   } catch (e) {
     res.status(500).json({ erro: e.message });
