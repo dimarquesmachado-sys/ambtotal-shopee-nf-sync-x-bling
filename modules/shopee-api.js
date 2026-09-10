@@ -409,24 +409,13 @@ async function shipOrder(loja, orderSn) {
   const temPickup = Array.isArray(infoNeeded.pickup);
   const temDropoff = Array.isArray(infoNeeded.dropoff);
 
-  /* 10/09: pedidos "Retirada pelo Comprador" vêm com OS DOIS modos ("Postagem /
-     Coleta") e a prioridade cega em pickup fazia o ship_order falhar — os únicos
-     2 do dia que não organizaram sozinhos eram exatamente desse tipo, enquanto a
-     Entrega Direta (coleta de verdade) seguiu funcionando. No EMPATE, o desempate
-     é o carrier do próprio pedido: coleta só quando o serviço é de coleta
-     (entrega direta/instant); todo o resto POSTA — a prática do galpão (o modal
-     da Shopee inclusive pré-marca "Eu Vou Postar"). */
-  let usarPickup = temPickup;
-  if (temPickup && temDropoff) {
-    let carrier = '';
-    try {
-      const dets = await buscarDetalhesPedidos(loja, [orderSn]);
-      const det = Array.isArray(dets) ? dets[0] : null;
-      carrier = String((det && (det.shipping_carrier || (det.package_list && det.package_list[0] && det.package_list[0].shipping_carrier))) || '').toLowerCase();
-    } catch (e) { console.log(`[shipOrder][${loja.key}] empate pickup/dropoff e detalhe falhou (${e.message}) — postagem por padrão`); }
-    usarPickup = /entrega direta|instant|same ?day|motoboy/.test(carrier);
-    console.log(`[shipOrder][${loja.key}] EMPATE pickup/dropoff — carrier="${carrier}" ⇒ ${usarPickup ? 'COLETA' : 'POSTAGEM'}`);
-  }
+  /* 10/09 — REGRA DO DONO: sempre que POSTAR for uma opção, a loja POSTA. Os dois
+     modos juntos ("Postagem / Coleta" — caso Retirada pelo Comprador) derrubavam o
+     ship_order porque a prioridade cega escolhia coleta; agora o empate é sempre
+     POSTAGEM, sem consulta nenhuma. Coleta só quando for o ÚNICO modo que a Shopee
+     oferece (Entrega Direta do motoboy — aí não existe escolha). */
+  const usarPickup = temPickup && !temDropoff;
+  if (temPickup && temDropoff) console.log(`[shipOrder][${loja.key}] Postagem/Coleta disponíveis — POSTAGEM (regra da loja)`);
 
   if (usarPickup) {
     // COLETA (Entrega Direta): pega o primeiro endereco e o primeiro horario disponivel
