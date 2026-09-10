@@ -9,7 +9,13 @@ const { lojasConfiguradas, getConfigLoja } = require('./lojas');
 
 // Processa o fluxo completo de UM pedido pra uma loja.
 async function processarPedido(loja, orderSn) {
-  const pedidoBling = await bling.buscarPedidoPorNumeroLoja(loja, orderSn);
+  /* 10/09: a busca sem janela via só os 10 pedidos mais RECENTES do Bling (o filtro
+     numeroLoja é ignorado pela API — ver bling-api.js) — pedido de ontem já estava
+     fora do topo e a rota manual respondia pedido_bling_nao_encontrado MESMO com o
+     numeroLoja preenchido. As rotas manuais passam janela funda (12 páginas, como o
+     re-sync aprendeu); o CRON segue sem opts (pedido novo está no topo, e paginar
+     fundo a cada não-importado multiplicaria chamadas ao Bling). */
+  const pedidoBling = await bling.buscarPedidoPorNumeroLoja(loja, orderSn, { maxPaginas: Number(opts.maxPaginas) || 1 });
   if (!pedidoBling) {
     return { order_sn: orderSn, loja: loja.key, status: 'pedido_bling_nao_encontrado' };
   }
@@ -180,7 +186,7 @@ async function cicloTodasLojas({ dryRun = false } = {}) {
 }
 
 // Sincroniza UM pedido especifico de UMA loja (pra testes manuais).
-async function sincronizarPedido(lojaKey, orderSn) {
+async function sincronizarPedido(lojaKey, orderSn, opts = {}) {
   const loja = getConfigLoja(lojaKey);
   console.log(`[sync-engine][${loja.key}] Sincronizando pedido especifico: ${orderSn}`);
   const r = await processarPedido(loja, orderSn);
