@@ -1268,6 +1268,22 @@ app.get('/pendentes', async (req, res) => {
 });
 
 // Sincroniza um pedido especifico de uma loja
+/* 10/09: GET de propósito, como o re-sync acima — o Diego opera pelo NAVEGADOR e a
+   versão POST não dispara de lá; esta responde o RESULTADO da sincronização na cara
+   (etapas, sucesso/erro da Shopee), virando a ferramenta de diagnóstico de pedido
+   único (nasceu na caça dos 2 Retirada pelo Comprador que não organizavam). */
+app.get('/:loja/sincronizar/:orderSn', resolverLoja, async (req, res) => {
+  if (!adminOk(req)) return res.status(404).send('Not found');
+  if (cicloRodando) return res.status(409).json({ erro: 'ciclo/lote rodando agora — tente de novo em 1-2 min' });
+  cicloRodando = true;
+  try {
+    const r = await engine.sincronizarPedido(req.loja.key, req.params.orderSn);
+    res.json(r);
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  } finally { cicloRodando = false; }
+});
+
 app.post('/:loja/sincronizar/:orderSn', resolverLoja, async (req, res) => {
   if (!adminOk(req)) return res.status(404).send('Not found'); // protegido: exige ?k=ADMIN_KEY
   // Codex PR#4: a trava vale pras entradas MANUAIS tambem — senao um sync avulso
