@@ -8,7 +8,7 @@ const log = require('./supabase-log');
 const { lojasConfiguradas, getConfigLoja } = require('./lojas');
 
 // Processa o fluxo completo de UM pedido pra uma loja.
-async function processarPedido(loja, orderSn) {
+async function processarPedido(loja, orderSn, opts = {}) {
   /* 10/09: a busca sem janela via só os 10 pedidos mais RECENTES do Bling (o filtro
      numeroLoja é ignorado pela API — ver bling-api.js) — pedido de ontem já estava
      fora do topo e a rota manual respondia pedido_bling_nao_encontrado MESMO com o
@@ -189,7 +189,7 @@ async function cicloTodasLojas({ dryRun = false } = {}) {
 async function sincronizarPedido(lojaKey, orderSn, opts = {}) {
   const loja = getConfigLoja(lojaKey);
   console.log(`[sync-engine][${loja.key}] Sincronizando pedido especifico: ${orderSn}`);
-  const r = await processarPedido(loja, orderSn);
+  const r = await processarPedido(loja, orderSn, opts);
   if (r.status !== 'sucesso') {
     throw new Error(`Falha ao sincronizar ${orderSn}: ${r.status}`);
   }
