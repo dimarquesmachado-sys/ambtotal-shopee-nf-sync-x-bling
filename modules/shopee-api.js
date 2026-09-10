@@ -409,7 +409,26 @@ async function shipOrder(loja, orderSn) {
   const temPickup = Array.isArray(infoNeeded.pickup);
   const temDropoff = Array.isArray(infoNeeded.dropoff);
 
-  if (temPickup) {
+  /* 10/09: pedidos "Retirada pelo Comprador" vêm com OS DOIS modos ("Postagem /
+     Coleta") e a prioridade cega em pickup fazia o ship_order falhar — os únicos
+     2 do dia que não organizaram sozinhos eram exatamente desse tipo, enquanto a
+     Entrega Direta (coleta de verdade) seguiu funcionando. No EMPATE, o desempate
+     é o carrier do próprio pedido: coleta só quando o serviço é de coleta
+     (entrega direta/instant); todo o resto POSTA — a prática do galpão (o modal
+     da Shopee inclusive pré-marca "Eu Vou Postar"). */
+  let usarPickup = temPickup;
+  if (temPickup && temDropoff) {
+    let carrier = '';
+    try {
+      const dets = await buscarDetalhesPedidos(loja, [orderSn]);
+      const det = Array.isArray(dets) ? dets[0] : null;
+      carrier = String((det && (det.shipping_carrier || (det.package_list && det.package_list[0] && det.package_list[0].shipping_carrier))) || '').toLowerCase();
+    } catch (e) { console.log(`[shipOrder][${loja.key}] empate pickup/dropoff e detalhe falhou (${e.message}) — postagem por padrão`); }
+    usarPickup = /entrega direta|instant|same ?day|motoboy/.test(carrier);
+    console.log(`[shipOrder][${loja.key}] EMPATE pickup/dropoff — carrier="${carrier}" ⇒ ${usarPickup ? 'COLETA' : 'POSTAGEM'}`);
+  }
+
+  if (usarPickup) {
     // COLETA (Entrega Direta): pega o primeiro endereco e o primeiro horario disponivel
     const addr = sp.pickup?.address_list?.[0];
     const pickup = {};
