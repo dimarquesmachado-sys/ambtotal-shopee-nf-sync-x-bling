@@ -1283,7 +1283,10 @@ app.get('/:loja/sincronizar/:orderSn', resolverLoja, async (req, res) => {
   if (cicloRodando) return res.status(409).json({ erro: 'ciclo/lote rodando agora — tente de novo em 1-2 min' });
   cicloRodando = true;
   try {
-    const r = await engine.sincronizarPedido(req.loja.key, req.params.orderSn, { maxPaginas: 12 });
+    /* Codex #9: o wrapper convertia diagnóstico não-sucesso em exceção GENÉRICA e a
+       rota perdia order_status/detalhe da Shopee — o diagnóstico devolve o objeto
+       inteiro do processarPedido, com a janela funda do #10. */
+    const r = await engine.processarPedido(req.loja, req.params.orderSn, { maxPaginas: 12 });
     res.json(r);
   } catch (e) {
     res.status(500).json({ erro: e.message });
