@@ -25,7 +25,13 @@ const app = express();
 // ── Chave p/ rotas sensíveis (acessadas com ?k=CHAVE na URL) ─────────────────
 // Sem a env ADMIN_KEY configurada no Render, essas rotas ficam DESLIGADAS (404).
 const ADMIN_KEY = process.env.ADMIN_KEY || '';
-function adminOk(req) { return ADMIN_KEY && req.query.k === ADMIN_KEY; }
+function adminOk(req) {
+  if (!ADMIN_KEY) return false;
+  const k = String(req.query.k || '');
+  /* Codex #9: chave com '+' colada no navegador chega como ESPAÇO (decode de query)
+     e a comparação exata dava 404 pra chave válida — restaurar o '+' cobre. */
+  return k === ADMIN_KEY || k.replace(/ /g, '+') === ADMIN_KEY;
+}
 app.use(express.json({ limit: '5mb' }));
 const PORT = process.env.PORT || 3000;
 
@@ -1277,7 +1283,10 @@ app.get('/:loja/sincronizar/:orderSn', resolverLoja, async (req, res) => {
   if (cicloRodando) return res.status(409).json({ erro: 'ciclo/lote rodando agora — tente de novo em 1-2 min' });
   cicloRodando = true;
   try {
-    const r = await engine.sincronizarPedido(req.loja.key, req.params.orderSn, { maxPaginas: 12 });
+    /* Codex #9: o wrapper convertia diagnóstico não-sucesso em exceção GENÉRICA e a
+       rota perdia order_status/detalhe da Shopee — o diagnóstico devolve o objeto
+       inteiro do processarPedido, com a janela funda do #10. */
+    const r = await engine.processarPedido(req.loja, req.params.orderSn, { maxPaginas: 12 });
     res.json(r);
   } catch (e) {
     res.status(500).json({ erro: e.message });
@@ -1436,12 +1445,15 @@ async function dispararCiclo(origem) {
 
 // Janela CRITICA do motoboy: 11h-13h, a cada 5 min (cobre 12:00, 12:05, 12:10, 12:15)
 const CRON_CRITICO = '*/5 11-12 * * *';
-cron.schedule(CRON_CRITICO, () => dispararCiclo('critico-5min'), { timezone: 'America/Sao_Paulo' });
+/* Codex #12: o boot real do verifica.js sobe este server num processo-filho com a
+   env completa — sem o guard, os crons AGENDAVAM ali e um ciclo de produção podia
+   disparar de dentro da bateria de teste. PULAR_CRON=1 desliga só o agendamento. */
+if (process.env.PULAR_CRON !== '1') cron.schedule(CRON_CRITICO, () => dispararCiclo('critico-5min'), { timezone: 'America/Sao_Paulo' });
 
 // Resto do dia: 24h, a cada 10 min.
 // (Nos minutos multiplos de 10 dentro da janela critica, a trava evita execucao dupla.)
 const CRON_NORMAL = '*/10 * * * *';
-cron.schedule(CRON_NORMAL, () => dispararCiclo('normal-10min'), { timezone: 'America/Sao_Paulo' });
+if (process.env.PULAR_CRON !== '1') cron.schedule(CRON_NORMAL, () => dispararCiclo('normal-10min'), { timezone: 'America/Sao_Paulo' });
 
 console.log(`[cron] Agendado CRITICO: ${CRON_CRITICO} | NORMAL: ${CRON_NORMAL} (America/Sao_Paulo)`);
 
@@ -1454,7 +1466,7 @@ const FBS_CRON = process.env.FBS_NF_CRON || '0 6,12,18,23 * * *';
 // Quais lojas buscar no cron (por padrão só amb, a única no Full hoje).
 const FBS_LOJAS = String(process.env.FBS_NF_LOJAS || 'amb').split(',').map(s => s.trim()).filter(Boolean);
 try {
-  cron.schedule(FBS_CRON, async () => {
+  if (process.env.PULAR_CRON !== '1') cron.schedule(FBS_CRON, async () => {
     for (const key of FBS_LOJAS) {
       try {
         const loja = getConfigLoja(key);

@@ -28,17 +28,26 @@ if (!problemas) ok(js.length + ' arquivos .js com sintaxe válida');
 
 console.log('═ 2. Variáveis não declaradas (a classe do bug do opts) ═');
 try {
-  const cfg = path.join(RAIZ, 'scripts', '.eslint-no-undef.mjs');
-  if (!fs.existsSync(cfg)) fs.writeFileSync(cfg, "export default [{ files: ['**/*.js'], ignores: ['node_modules/**'], languageOptions: { ecmaVersion: 2022, sourceType: 'commonjs', globals: { require: 'readonly', module: 'readonly', process: 'readonly', console: 'readonly', __dirname: 'readonly', Buffer: 'readonly', setTimeout: 'readonly', clearTimeout: 'readonly', setInterval: 'readonly', URLSearchParams: 'readonly', URL: 'readonly', fetch: 'readonly', AbortController: 'readonly', AbortSignal: 'readonly', structuredClone: 'readonly', queueMicrotask: 'readonly', setImmediate: 'readonly', exports: 'writable' } }, rules: { 'no-undef': 'error' } }];\n");
-  const saida = execSync('npx --yes eslint --no-config-lookup -c scripts/.eslint-no-undef.mjs server.js modules test 2>&1 || true', { cwd: RAIZ, encoding: 'utf8', timeout: 120000 });
+  /* Codex #12: config em TMPDIR sempre regravada (não suja o checkout nem congela
+     versão velha via existsSync). */
+  const os = require('os');
+  const cfg = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'verifica-lint-')), 'no-undef.mjs');
+  fs.writeFileSync(cfg, "export default [{ files: ['**/*.js'], ignores: ['node_modules/**'], languageOptions: { ecmaVersion: 2022, sourceType: 'commonjs', globals: { require: 'readonly', module: 'readonly', process: 'readonly', console: 'readonly', __dirname: 'readonly', Buffer: 'readonly', setTimeout: 'readonly', clearTimeout: 'readonly', setInterval: 'readonly', URLSearchParams: 'readonly', URL: 'readonly', fetch: 'readonly', AbortController: 'readonly', AbortSignal: 'readonly', structuredClone: 'readonly', queueMicrotask: 'readonly', setImmediate: 'readonly', exports: 'writable' } }, rules: { 'no-undef': 'error' } }];\n");
+  /* Codex #12: cobertura de TODOS os .js que o --check viu (scripts e raiz inclusos). */
+  const saida = execSync('npx --yes eslint --no-config-lookup -c ' + JSON.stringify(cfg) + ' ' + js.map(f => JSON.stringify(f)).join(' ') + ' 2>&1 || true', { cwd: RAIZ, encoding: 'utf8', timeout: 120000 });
   if (/no-undef/.test(saida)) ruim('variável não declarada:\n' + saida.split('\n').filter(l => /no-undef|\.js$/.test(l)).slice(0, 10).join('\n'));
-  else if (/Error|error while|Oops/.test(saida) && !/problems/.test(saida)) console.log('  ⚠ eslint indisponível (' + saida.split('\n')[0].slice(0, 80) + ') — etapa pulada, não bloqueia');
-  else ok('nenhuma variável usada sem declarar');
-} catch (e) { console.log('  ⚠ eslint não rodou (' + String(e.message).slice(0, 80) + ') — etapa pulada'); }
+  else if (/Error|error while|Oops/.test(saida) && !/problems/.test(saida)) ruim('eslint NÃO RODOU (' + (saida.split('\n').find(l => l.trim()) || '').slice(0, 100) + ') — etapa MANDATÓRIA (fail closed); instale: npm install --no-save eslint');
+  else ok('nenhuma variável usada sem declarar (' + js.length + ' arquivos)');
+} catch (e) { ruim('eslint não rodou (' + String(e.message).slice(0, 80) + ') — etapa mandatória, fail closed'); }
 
 console.log('═ 3. Boot real do servidor ═');
+(async () => {
 try {
-  const env = Object.assign({}, process.env, { PORT: '3891', NODE_ENV: 'test' });
+  /* Codex #12: porta LIVRE (3891 fixa colidia e culpava o server pela falha do
+     harness) e PULAR_CRON=1 — o filho de teste não agenda ciclos de produção. */
+  const net = require('net');
+  const porta = await new Promise((res) => { const sv = net.createServer(); sv.listen(0, () => { const p = sv.address().port; sv.close(() => res(p)); }); });
+  const env = Object.assign({}, process.env, { PORT: String(porta), NODE_ENV: 'test', PULAR_CRON: '1' });
   const filho = spawn('node', ['server.js'], { cwd: RAIZ, env, stdio: 'pipe' });
   let saiu = false; let logBoot = '';
   filho.stdout.on('data', d => logBoot += d);
@@ -52,8 +61,9 @@ try {
       await espera();
       if (saiu) break;
       try {
-        const r = await fetch('http://localhost:3891/');
-        if (r.status > 0) { subiu = true; break; }
+        const r = await fetch('http://localhost:' + porta + '/');
+        if (r.ok) { subiu = true; break; } /* Codex #12: 500 na raiz passava como saudável */
+        if (r.status >= 400) { logBoot += '\n[probe] raiz respondeu HTTP ' + r.status; break; }
       } catch (e) { /* ainda subindo */ }
     }
     if (subiu) ok('server.js sobe e responde na raiz (boot real)');
@@ -70,3 +80,4 @@ try {
     process.exit(problemas ? 1 : 0);
   })();
 } catch (e) { ruim('boot: ' + e.message); console.log('\n❌ NAO SUBIR'); process.exit(1); }
+})();
