@@ -409,7 +409,15 @@ async function shipOrder(loja, orderSn) {
   const temPickup = Array.isArray(infoNeeded.pickup);
   const temDropoff = Array.isArray(infoNeeded.dropoff);
 
-  if (temPickup) {
+  /* 10/09 — REGRA DO DONO: sempre que POSTAR for uma opção, a loja POSTA. Os dois
+     modos juntos ("Postagem / Coleta" — caso Retirada pelo Comprador) derrubavam o
+     ship_order porque a prioridade cega escolhia coleta; agora o empate é sempre
+     POSTAGEM, sem consulta nenhuma. Coleta só quando for o ÚNICO modo que a Shopee
+     oferece (Entrega Direta do motoboy — aí não existe escolha). */
+  const usarPickup = temPickup && !temDropoff;
+  if (temPickup && temDropoff) console.log(`[shipOrder][${loja.key}] Postagem/Coleta disponíveis — POSTAGEM (regra da loja)`);
+
+  if (usarPickup) {
     // COLETA (Entrega Direta): pega o primeiro endereco e o primeiro horario disponivel
     const addr = sp.pickup?.address_list?.[0];
     const pickup = {};
