@@ -17,7 +17,40 @@ function getClient() {
   return supabase;
 }
 
+/* 11/09 — LOG EM DISCO, porque o do Supabase está mudo: as envs SUPABASE_URL e
+   SUPABASE_SERVICE_KEY nunca foram preenchidas neste serviço, então getClient()
+   devolvia null, logSync não gravava nada e /logs respondia [] — foi o que me deixou
+   cego na caça dos 2 pedidos "Retirada pelo Comprador" (10/09): sem registro, não dava
+   pra saber o que a Shopee tinha recusado. Agora todo evento cai também num arquivo
+   local (anel de 400 linhas, em /data quando existe disco). Não substitui o Supabase
+   — se as envs forem preenchidas, os dois passam a valer. */
+const _fsL = require('fs');
+const _pathL = require('path');
+const LOG_ARQ = (() => {
+  try { return _fsL.existsSync('/data') ? '/data/shopee-sync-log.json' : _pathL.join(__dirname, '..', 'shopee-sync-log.json'); }
+  catch (e) { return _pathL.join(__dirname, '..', 'shopee-sync-log.json'); }
+})();
+const LOG_TETO = 400;
+function logEmDisco(reg) {
+  try {
+    let arr = [];
+    try { arr = JSON.parse(_fsL.readFileSync(LOG_ARQ, 'utf8')); } catch (e) { arr = []; }
+    if (!Array.isArray(arr)) arr = [];
+    arr.unshift(Object.assign({ criado_em: new Date().toISOString() }, reg));
+    if (arr.length > LOG_TETO) arr = arr.slice(0, LOG_TETO);
+    _fsL.writeFileSync(LOG_ARQ + '.tmp', JSON.stringify(arr));
+    _fsL.renameSync(LOG_ARQ + '.tmp', LOG_ARQ);
+  } catch (e) { /* melhor-esforço: log nunca derruba o fluxo */ }
+}
+function lerLogDoDisco(limit) {
+  try {
+    const arr = JSON.parse(_fsL.readFileSync(LOG_ARQ, 'utf8'));
+    return Array.isArray(arr) ? arr.slice(0, limit || 50) : [];
+  } catch (e) { return []; }
+}
+
 async function logSync({ order_sn, loja, pedido_bling_id, nfe_id, chave_acesso, status, erro, etapa }) {
+  logEmDisco({ order_sn, loja, pedido_bling_id, nfe_id, chave_acesso, status, erro, etapa });
   const client = getClient();
   if (!client) return;
 
@@ -80,4 +113,4 @@ async function ultimasExecucoes(limit = 50) {
   return data || [];
 }
 
-module.exports = { logSync, jaSincronizado, ultimasExecucoes };
+module.exports = { logSync, jaSincronizado, ultimasExecucoes, lerLogDoDisco, LOG_ARQ };

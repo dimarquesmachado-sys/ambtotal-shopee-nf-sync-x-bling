@@ -1415,7 +1415,12 @@ app.get('/logs', async (req, res) => {
   try {
     const limit = parseInt(req.query.limit) || 50;
     const r = await log.ultimasExecucoes(limit);
-    res.json(r);
+    /* 11/09: Supabase mudo (envs ausentes) devolvia [] e o dono ficava sem diagnóstico
+       nenhum — agora o disco cobre, e a resposta diz de ONDE veio. */
+    if (Array.isArray(r) && r.length) { res.json({ fonte: 'supabase', total: r.length, registros: r }); return; }
+    const d = log.lerLogDoDisco(limit);
+    res.json({ fonte: d.length ? 'disco' : 'vazio', arquivo: log.LOG_ARQ, total: d.length, registros: d,
+               dica: d.length ? undefined : 'nenhum evento registrado ainda — o log em disco começa a encher no próximo ciclo' });
   } catch (e) {
     res.status(500).json({ erro: e.message });
   }
