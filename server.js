@@ -1417,10 +1417,24 @@ app.get('/logs', async (req, res) => {
     const r = await log.ultimasExecucoes(limit);
     /* 11/09: Supabase mudo (envs ausentes) devolvia [] e o dono ficava sem diagnóstico
        nenhum — agora o disco cobre, e a resposta diz de ONDE veio. */
-    if (Array.isArray(r) && r.length) { res.json({ fonte: 'supabase', total: r.length, registros: r }); return; }
-    const d = log.lerLogDoDisco(limit);
-    res.json({ fonte: d.length ? 'disco' : 'vazio', arquivo: log.LOG_ARQ, total: d.length, registros: d,
-               dica: d.length ? undefined : 'nenhum evento registrado ainda — o log em disco começa a encher no próximo ciclo' });
+    /* Codex #14: preferir o Supabase quando ele tem QUALQUER linha escondia o evento cujo
+       insert falhou — que fica só no disco e é exatamente o que se quer ver numa pane
+       parcial. As duas fontes são UNIDAS, sem duplicar (chave: order_sn + etapa + minuto). */
+    const doDisco = log.lerLogDoDisco(limit * 2);
+    const supa = Array.isArray(r) ? r : [];
+    const chave = (x) => [x.order_sn, x.etapa, String(x.criado_em || '').slice(0, 16)].join('|');
+    const vistos = new Set(supa.map(chave));
+    const soDoDisco = doDisco.filter(x => !vistos.has(chave(x)));
+    const todos = supa.concat(soDoDisco)
+      .sort((a, b) => String(b.criado_em || '').localeCompare(String(a.criado_em || '')))
+      .slice(0, limit);
+    res.json({
+      fonte: supa.length && soDoDisco.length ? 'supabase+disco' : (supa.length ? 'supabase' : (doDisco.length ? 'disco' : 'vazio')),
+      arquivo: log.LOG_ARQ, persistente: log.LOG_PERSISTENTE,
+      total: todos.length, do_supabase: supa.length, so_no_disco: soDoDisco.length, registros: todos,
+      dica: todos.length ? (log.LOG_PERSISTENTE ? undefined : 'o log em disco está em área EFÊMERA — sobrevive ao ciclo, não ao deploy; monte um disco em /data ou preencha SUPABASE_URL/SUPABASE_SERVICE_KEY')
+                         : 'nenhum evento registrado ainda — o log começa a encher no próximo ciclo',
+    });
   } catch (e) {
     res.status(500).json({ erro: e.message });
   }

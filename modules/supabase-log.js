@@ -30,6 +30,8 @@ const LOG_ARQ = (() => {
   try { return _fsL.existsSync('/data') ? '/data/shopee-sync-log.json' : _pathL.join(__dirname, '..', 'shopee-sync-log.json'); }
   catch (e) { return _pathL.join(__dirname, '..', 'shopee-sync-log.json'); }
 })();
+const LOG_PERSISTENTE = (() => { try { return _fsL.existsSync('/data'); } catch (e) { return false; } })();
+if (!LOG_PERSISTENTE) console.warn('[log] sem disco em /data — o log local é EFÊMERO (some no deploy). Monte um disco ou configure SUPABASE_URL/SUPABASE_SERVICE_KEY para histórico durável.');
 const LOG_TETO = 400;
 function logEmDisco(reg) {
   try {
@@ -113,4 +115,4 @@ async function ultimasExecucoes(limit = 50) {
   return data || [];
 }
 
-module.exports = { logSync, jaSincronizado, ultimasExecucoes, lerLogDoDisco, LOG_ARQ };
+module.exports = { logSync, jaSincronizado, ultimasExecucoes, lerLogDoDisco, LOG_ARQ, LOG_PERSISTENTE };
