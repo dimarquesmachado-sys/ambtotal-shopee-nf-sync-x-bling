@@ -156,7 +156,12 @@ async function cicloLoja(loja, { dryRun = false } = {}) {
       if (r.status === 'sucesso') {
         resultado.sucessos++;
       } else {
-        await log.logSync({ order_sn: orderSn, loja: loja.key, status: r.status, etapa: 'detect', erro: r.status });
+        /* Codex #14: gravar `erro: r.status` guardava só o rótulo (ex.: aguardando_prontidao)
+           e jogava fora a MENSAGEM da Shopee que o processarPedido preservou em r.detalhe —
+           justo o texto que faltou na caça dos 2 pedidos de 10/09 e que motivou este log. */
+        await log.logSync({ order_sn: orderSn, loja: loja.key, status: r.status, etapa: r.etapa || 'detect',
+                            erro: r.detalhe ? (r.status + ': ' + String(r.detalhe).slice(0, 400)) : r.status,
+                            pedido_bling_id: r.pedido_bling_id, nfe_id: r.nfe_id, chave_acesso: r.chave });
       }
       resultado.detalhes.push(r);
     } catch (e) {
