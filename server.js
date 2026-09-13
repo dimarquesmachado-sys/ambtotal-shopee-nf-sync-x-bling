@@ -991,7 +991,11 @@ app.get('/:loja/interno/cancelados', resolverLoja, async (req, res) => {
   const k = String(req.query.k || '').trim() || kHdr || kAuth;
   if (!chavesOk.length || !chavesOk.includes(k)) return res.status(404).send('Not found');
   try {
-    const dias = Math.max(1, Math.min(60, Number(req.query.dias) || 30));
+    /* 13/09 — o teto de 60 dias impedia a limpeza retroativa do ANO, que o dono precisa
+       fazer uma vez (cancelado antigo seguiu contando faturamento e imposto). O trabalho
+       pesado já está resolvido — janela fatiada de 15 em 15 dias, cada fatia paginada —,
+       então 400 dias são ~27 fatias: minutos de execução, mesmo desenho. */
+    const dias = Math.max(1, Math.min(400, Number(req.query.dias) || 30));
     const lista = await shopee.listarPedidosPorStatus(req.loja, 'CANCELLED', dias);
     const sns = (lista || []).map(x => (typeof x === 'string' ? x : (x && (x.order_sn || x.orderSn)))).filter(Boolean);
     /* Codex #19 r2: se alguma fatia bateu no teto de páginas, a lista está INCOMPLETA —
