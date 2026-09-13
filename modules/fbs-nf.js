@@ -322,6 +322,9 @@ async function rotina(loja, opts = {}) {
     if (sf) return { ok: true, sem_full: true, aprendido_em: sf.em, motivo: 'a Shopee não gera documento de Full pra esta loja (' + sf.motivo + ') — use &forcar=1 pra tentar de novo, ou declare ' + (loja.prefixo || '') + '_FBS=1' };
   }
   if (decl === 'sim') limparSemFull(loja.key);
+  /* Codex #18 (P2): forçado que DER CERTO prova que a loja ganhou Full — a memória tem que
+     sair, senão a próxima rodada automática volta a pular. Limpo no fim, com resultado. */
+  const _eraSemFull = decl === 'auto' && !!lerSemFull(loja.key);
   ensureDir(NF_DIR);
   try { limpar(loja.key); } catch (e) {}   // remove ZIPs antigos com timestamp
   const end = ymdSP();
@@ -349,8 +352,14 @@ async function rotina(loja, opts = {}) {
        loja sem Full — no modo auto isso vira memória e a rotina para de insistir (e de
        gastar chamada). Declarada como 'sim', segue reportando erro de verdade. */
     const todosFalharam = (st.erros || []).length > 0 && !(st.prontos || []).length && !(st.aindaProcessando || []).length;
-    if (todosFalharam && String(loja.fbs || 'auto') !== 'sim') {
-      const motivo = (st.erros[0] && st.erros[0].msg) || 'FAILED';
+    /* Codex #18 (P1): pane TEMPORÁRIA da Shopee também derruba todas as tarefas — marcar
+       'sem Full' nesse caso condenaria uma loja que TEM Full a nunca mais importar, em
+       silêncio, que é pior do que o alarme que eu queria calar. Só marca quando a recusa
+       tem cara de PERMISSÃO/ausência de Full; erro genérico volta a ser erro e o dono vê. */
+    const msgErro = String((st.erros[0] && st.erros[0].msg) || 'FAILED');
+    const ehFaltaDeFull = /permission|not.*(authoriz|allow)|no.*(fbs|fulfillment)|not.*support|shop.*not.*(enabl|open)|invalid.*shop/i.test(msgErro);
+    if (todosFalharam && ehFaltaDeFull && String(loja.fbs || 'auto') !== 'sim') {
+      const motivo = msgErro;
       marcarSemFull(loja.key, motivo);
       return { ok: true, sem_full: true, aprendido_agora: true, status: st,
                motivo: 'a Shopee não gerou documento de Full pra esta loja (' + motivo + ') — anotado; declare ' + (loja.prefixo || '') + '_FBS=1 se ela passar a usar Full',
@@ -387,6 +396,7 @@ async function rotina(loja, opts = {}) {
   }
 
   const deparaAdd = gravarDePara(loja.key, sep.saida.concat(sep.entrada));
+  if (_eraSemFull) limparSemFull(loja.key);   /* baixou nota: a loja tem Full, esqueço a anotação */
   return {
     ok: true,
     periodo: { de: ymdRotulo(start), ate: ymdRotulo(end) },

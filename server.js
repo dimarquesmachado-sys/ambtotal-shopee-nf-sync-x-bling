@@ -107,7 +107,7 @@ app.get('/:loja/fbs/rodar', resolverLoja, async (req, res) => {
   if (!fbsAuthOk(req)) return res.status(401).json({ ok: false, erro: 'chave invalida (ADMIN_KEY ou INTERNAL_KEY deste servico)' });
   try {
     const dias = req.query.dias ? Number(req.query.dias) : undefined;
-    const r = await fbsNf.rotina(req.loja, { dias });
+    const r = await fbsNf.rotina(req.loja, { forcar: String(req.query.forcar || '') === '1', dias });
     try { fbsNf.limpar(req.loja.key); } catch (e) {}
     res.json({ ok: true, loja: req.loja.key, resultado: r });
   } catch (e) { res.status(500).json({ ok: false, erro: String(e.message || e) }); }
@@ -183,7 +183,7 @@ app.get('/:loja/fbs/ext/estado', resolverLoja, async (req, res) => {
 app.get('/:loja/fbs/ext/buscar', resolverLoja, async (req, res) => {
   if (!fbsAuthOk(req)) return res.status(401).json({ ok: false, erro: 'chave invalida' });
   try {
-    const r = await fbsNf.rotina(req.loja, {});
+    const r = await fbsNf.rotina(req.loja, { forcar: String(req.query.forcar || '') === '1' });   /* Codex #18: a rota de busca da extensão também precisa do forçado */
     res.json({ ok: true, empresa: req.loja.key, resultado: { precisa: r.novas ? (r.novas.saida + r.novas.entrada) > 0 : false, novas: r.novas, emitente: r.emitente, periodo: r.periodo, motivo: r.ok ? undefined : r.motivo } });
   } catch (e) { res.status(500).json({ ok: false, erro: String(e.message || e) }); }
 });
