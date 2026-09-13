@@ -195,6 +195,36 @@ function gravarDePara(lojaKey, itens) {
   try { fs.writeFileSync(arqDePara(lojaKey), JSON.stringify(mapa)); } catch (e) {}
   return add;
 }
+/* 13/09 — PREENCHER O PASSADO. O de-para só nasce quando a importação roda, então as
+   notas do Full já baixadas ficariam de fora. Esta varredura abre os ZIPs que estão em
+   disco, lê o xPed de cada XML e completa o mapa — sem falar com a Shopee, sem baixar
+   nada de novo e sem tocar no Bling. Idempotente: chave já registrada é reescrita com o
+   mesmo valor. */
+function reconstruirDePara(lojaKey) {
+  let nomes = [];
+  try { nomes = fs.readdirSync(NF_DIR); } catch (e) { return { ok: false, erro: 'pasta de NFs não existe ainda' }; }
+  const zips = nomes.filter(n => n.startsWith(lojaKey + '-') && /\.zip$/i.test(n));
+  let xmls = 0, comPedido = 0, semPedido = 0;
+  const itens = [];
+  for (const n of zips) {
+    try {
+      const zip = new AdmZip(path.join(NF_DIR, n));
+      for (const e of zip.getEntries()) {
+        if (!/\.xml$/i.test(e.entryName)) continue;
+        const dados = e.getData();
+        const chave = nfChave(dados, e.entryName);
+        if (!chave) continue;
+        xmls++;
+        const ped = nfPedidoLoja(dados);
+        if (ped) { comPedido++; itens.push({ chave, pedido_loja: ped }); } else semPedido++;
+      }
+    } catch (err) { /* zip corrompido não interrompe o resto */ }
+  }
+  const add = gravarDePara(lojaKey, itens);
+  return { ok: true, loja: lojaKey, zips: zips.length, xmls, com_pedido: comPedido, sem_pedido: semPedido,
+           novos_no_mapa: add, total_no_mapa: Object.keys(lerDePara(lojaKey)).length };
+}
+
 function acharPorPedido(lojaKey, pedidoLoja) {
   const alvo = String(pedidoLoja || '').trim().toUpperCase();
   const mapa = lerDePara(lojaKey);
@@ -368,7 +398,7 @@ function estadoAtual(loja) {
 }
 
 module.exports = {
-  lerDePara, acharPorPedido, nfPedidoLoja,
+  lerDePara, acharPorPedido, nfPedidoLoja, reconstruirDePara,
   NF_DIR, rotina, estadoAtual, marcarImportadas, chavesDoZip, caminhoZip, limpar,
   lerImportadas, nfEmitente, nfChave, ymdSP,
   // expostos p/ teste
