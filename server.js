@@ -977,6 +977,38 @@ app.get('/:loja/interno/pedidos-do-dia', resolverLoja, async (req, res) => {
   }
 });
 
+/* 13/09 — QUEM CANCELA É A SHOPEE, e o Bling é espelho: espelho pode não refletir. O
+   dono pediu a fonte da verdade depois do caso do 4645 (cancelado por falta de pagamento).
+   Esta rota pergunta à Shopee QUAIS pedidos foram cancelados no período — uma listagem
+   paginada, barata, sem escrow — pra o checkout marcar no índice sem depender do Bling. */
+app.get('/:loja/interno/cancelados', resolverLoja, async (req, res) => {
+  /* Codex #19: aceitar as MESMAS formas de chave interna que as outras rotas de máquina —
+     query, header x-internal-key e Authorization: Bearer — senão um chamador que segue o
+     padrão da casa leva 404 e o motivo fica invisível. */
+  const chavesOk = [process.env.INTERNAL_KEY, process.env.ADMIN_KEY].filter(Boolean).map(s => String(s).trim());
+  const kHdr = String(req.headers['x-internal-key'] || '').trim();
+  const kAuth = String(req.headers['authorization'] || '').replace(/^Bearer\s+/i, '').trim();
+  const k = String(req.query.k || '').trim() || kHdr || kAuth;
+  if (!chavesOk.length || !chavesOk.includes(k)) return res.status(404).send('Not found');
+  try {
+    /* 13/09 — o teto de 60 dias impedia a limpeza retroativa do ANO, que o dono precisa
+       fazer uma vez (cancelado antigo seguiu contando faturamento e imposto). O trabalho
+       pesado já está resolvido — janela fatiada de 15 em 15 dias, cada fatia paginada —,
+       então 400 dias são ~27 fatias: minutos de execução, mesmo desenho. */
+    const dias = Math.max(1, Math.min(400, Number(req.query.dias) || 30));
+    const lista = await shopee.listarPedidosPorStatus(req.loja, 'CANCELLED', dias);
+    const sns = (lista || []).map(x => (typeof x === 'string' ? x : (x && (x.order_sn || x.orderSn)))).filter(Boolean);
+    /* Codex #19 r2: se alguma fatia bateu no teto de páginas, a lista está INCOMPLETA —
+       quem consome precisa saber, senão conclui "só isso de cancelado" e erra pra menos. */
+    const truncado = (lista && lista.truncado) || null;
+    res.json({ ok: true, loja: req.loja.key, dias, total: sns.length, order_sns: sns,
+               truncado: truncado || undefined,
+               aviso: truncado ? 'lista INCOMPLETA: fatias truncadas no teto de páginas — rode com menos dias' : undefined });
+  } catch (e) {
+    res.status(500).json({ ok: false, erro: String(e.message || e).slice(0, 300) });
+  }
+});
+
 app.get('/:loja/interno/margem-pedidos', resolverLoja, async (req, res) => {
   // v2.4.1 - aceita INTERNAL_KEY ou ADMIN_KEY deste servico; tolera espaco copiado
   // nas pontas e o classico '+' da chave que o navegador transforma em espaco no ?k=

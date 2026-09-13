@@ -173,9 +173,49 @@ async function shopeeApiCall(loja, apiPath, method = 'GET', body = null, extraQu
 // ORDER LISTING
 // =============================================================================
 
-async function listarPedidosPorStatus(loja, orderStatus, diasAtras = 7) {
-  const agora = Math.floor(Date.now() / 1000);
-  const inicio = agora - (diasAtras * 24 * 60 * 60);
+/* 13/09 — LISTAGEM COMPLETA POR STATUS (Codex #19): a versão antiga fazia UMA chamada com
+   a janela inteira e sem paginar. Dois furos sérios pra achar cancelados:
+     · a Shopee limita o intervalo de get_order_list a 15 dias — pedir 30 ou 45 devolve
+       erro ou nada, e a varredura concluiria "nenhum cancelado" com cara de sucesso;
+     · com mais de 100 pedidos no período, o resto ficava pra trás em silêncio (more /
+       next_cursor eram ignorados).
+   Agora a janela é fatiada de 15 em 15 dias e cada fatia é paginada até o fim. O filtro é
+   por UPDATE time: cancelamento é evento de atualização — um pedido criado há 40 dias e
+   cancelado ontem tem que aparecer numa varredura de 7 dias. */
+async function listarPedidosPorStatus(loja, orderStatus, diasAtras = 7, opts = {}) {
+  const porAtualizacao = opts.porAtualizacao !== false && String(orderStatus).toUpperCase() === 'CANCELLED';
+  const fim0 = Math.floor(Date.now() / 1000);
+  const ini0 = fim0 - (Math.max(1, diasAtras) * 86400);
+  const JANELA = 15 * 86400;                       /* teto da Shopee */
+  const todos = [];
+  const vistos = new Set();
+  const truncadas = [];
+  for (let de = ini0; de < fim0; de += JANELA) {
+    const ate = Math.min(de + JANELA - 1, fim0);
+    let cursor = '';
+    for (let pg = 0; pg < 50; pg++) {               /* teto de segurança: 50 páginas por fatia */
+      const lote = await _listarPedidosBruto(loja, orderStatus, de, ate, cursor, porAtualizacao);
+      for (const p of (lote.lista || [])) {
+        const sn = typeof p === 'string' ? p : (p && p.order_sn);
+        if (sn && !vistos.has(sn)) { vistos.add(sn); todos.push(p); }
+      }
+      if (!lote.more || !lote.cursor) break;
+      cursor = lote.cursor;
+      /* Codex #19 r2: bater no teto de 50 páginas com `more` ainda true significa que a
+         fatia foi TRUNCADA — e devolver a lista curta em silêncio faria a varredura
+         concluir com menos cancelados do que existem, exatamente o tipo de número
+         faltando que passa despercebido. Marca e deixa o chamador ver. */
+      if (pg === 49 && lote.more) {
+        truncadas.push({ de: new Date(de * 1000).toISOString().slice(0, 10), ate: new Date(ate * 1000).toISOString().slice(0, 10) });
+      }
+    }
+  }
+  if (truncadas.length) todos.truncado = truncadas;
+  return todos;
+}
+
+async function _listarPedidosBruto(loja, orderStatus, timeFrom, timeTo, cursor, porAtualizacao) {
+  const inicio = timeFrom, agora = timeTo;
 
   const apiPath = `/api/v2/order/get_order_list`;
   const tokens = await getValidShopeeToken(loja);
@@ -189,19 +229,24 @@ async function listarPedidosPorStatus(loja, orderStatus, diasAtras = 7) {
     `access_token=${tokens.access_token}`,
     `shop_id=${tokens.shop_id}`,
     `sign=${sign}`,
-    `time_range_field=create_time`,
+    `time_range_field=${porAtualizacao ? 'update_time' : 'create_time'}`,
     `time_from=${inicio}`,
     `time_to=${agora}`,
     `page_size=100`,
+    (cursor ? `cursor=${encodeURIComponent(cursor)}` : ''),
     `order_status=${orderStatus}`
-  ].join('&');
+  ].filter(Boolean).join('&');
 
   const url = `${SHOPEE_BASE}${apiPath}?${queryParams}`;
   const response = await fetch(url);
   const data = await response.json();
 
   if (data.error) throw new Error(`[${loja.key}] Shopee get_order_list (${orderStatus}) erro: ${JSON.stringify(data)}`);
-  return data.response?.order_list || [];
+  return {
+    lista: data.response?.order_list || [],
+    more: !!data.response?.more,
+    cursor: data.response?.next_cursor || '',
+  };
 }
 
 // Pedidos aguardando NF (precisam ter a NF enviada)
