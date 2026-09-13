@@ -301,7 +301,10 @@ function gravarImportadas(lojaKey, reg) {
    com a loja em modo auto. Some se o dono declarar <PREFIXO>_FBS=1. */
 function arqSemFull(lojaKey) { return path.join(NF_DIR, '_sem-full-' + lojaKey + '.json'); }
 function marcarSemFull(lojaKey, motivo) {
-  try { ensureDir(NF_DIR); fs.writeFileSync(arqSemFull(lojaKey), JSON.stringify({ em: new Date().toISOString(), motivo })); } catch (e) {}
+  /* Codex #18 r2: disco somente-leitura ou cheio fazia a anotação sumir em silêncio, e a
+     resposta ainda dizia 'anotado' — na prática a loja tentaria de novo a cada rodada. */
+  try { ensureDir(NF_DIR); fs.writeFileSync(arqSemFull(lojaKey), JSON.stringify({ em: new Date().toISOString(), motivo })); return true; }
+  catch (e) { console.warn('[fbs] nao consegui anotar sem-Full de ' + lojaKey + ': ' + (e.message || e)); return false; }
 }
 function lerSemFull(lojaKey) {
   try { return JSON.parse(fs.readFileSync(arqSemFull(lojaKey), 'utf8')); } catch (e) { return null; }
@@ -335,13 +338,28 @@ async function rotina(loja, opts = {}) {
 
   // etapa 1: gera tarefas de cada tipo de documento pedido
   let requestIds = [];
+  const errosGerar = [];   /* Codex #18 r2: recusa na geração também ensina */
   for (const dt of tiposDoc()) {
+    /* Codex #18 r2 (P2): loja sem Full costuma ser recusada JÁ NA GERAÇÃO da tarefa — o
+       erro caía neste catch, virava 'nenhuma tarefa gerada (sem notas no período?)' e o
+       aprendizado nunca acontecia, deixando a rotina tentar pra sempre. As mensagens são
+       guardadas pra a mesma regra de permissão decidir logo abaixo. */
     try { const ids = await fbsGerar(loja, start, end, dt, fileType, docStatus); requestIds.push(...ids); }
-    catch (e) { console.error(`[fbs-nf][${loja.key}] gerar tipo ${dt}: ${e.message}`); }
+    catch (e) { errosGerar.push(String(e.message || e)); console.error(`[fbs-nf][${loja.key}] gerar tipo ${dt}: ${e.message}`); }
     await sleep(400);
   }
   requestIds = Array.from(new Set(requestIds.map(Number)));
-  if (!requestIds.length) return { ok: false, motivo: 'nenhuma tarefa gerada (sem notas no período?)', periodo: { de: ymdRotulo(start), ate: ymdRotulo(end) } };
+  if (!requestIds.length) {
+    const dePermissaoG = (m) => /permission|not.*(authoriz|allow)|no.*(fbs|fulfillment)|not.*support|shop.*not.*(enabl|open)|invalid.*shop/i.test(String(m || ''));
+    if (errosGerar.length && errosGerar.every(dePermissaoG) && String(loja.fbs || 'auto') !== 'sim') {
+      const anotou = marcarSemFull(loja.key, errosGerar[0].slice(0, 200));
+      return { ok: true, sem_full: true, aprendido_agora: anotou, anotacao_falhou: !anotou,
+               motivo: 'a Shopee recusou gerar documento de Full pra esta loja (' + errosGerar[0].slice(0, 160) + ')',
+               periodo: { de: ymdRotulo(start), ate: ymdRotulo(end) } };
+    }
+    return { ok: false, motivo: errosGerar.length ? ('falha ao gerar tarefa: ' + errosGerar[0].slice(0, 160)) : 'nenhuma tarefa gerada (sem notas no período?)',
+             periodo: { de: ymdRotulo(start), ate: ymdRotulo(end) } };
+  }
 
   // etapa 2: espera ficar pronto
   const st = await fbsAguardar(loja, requestIds);
@@ -357,11 +375,16 @@ async function rotina(loja, opts = {}) {
        silêncio, que é pior do que o alarme que eu queria calar. Só marca quando a recusa
        tem cara de PERMISSÃO/ausência de Full; erro genérico volta a ser erro e o dono vê. */
     const msgErro = String((st.erros[0] && st.erros[0].msg) || 'FAILED');
-    const ehFaltaDeFull = /permission|not.*(authoriz|allow)|no.*(fbs|fulfillment)|not.*support|shop.*not.*(enabl|open)|invalid.*shop/i.test(msgErro);
+    /* Codex #18 r2 (P1): com vários tipos de documento, olhar SÓ o primeiro erro deixava
+       marcar 'sem Full' quando uma tarefa foi recusada por permissão e as outras caíram
+       por pane — e aí a loja com Full parava de importar em silêncio. Todas as falhas
+       precisam ser de permissão pra conclusão valer. */
+    const dePermissao = (m) => /permission|not.*(authoriz|allow)|no.*(fbs|fulfillment)|not.*support|shop.*not.*(enabl|open)|invalid.*shop/i.test(String(m || ''));
+    const ehFaltaDeFull = (st.erros || []).length > 0 && (st.erros || []).every(e => dePermissao(e && e.msg));
     if (todosFalharam && ehFaltaDeFull && String(loja.fbs || 'auto') !== 'sim') {
       const motivo = msgErro;
-      marcarSemFull(loja.key, motivo);
-      return { ok: true, sem_full: true, aprendido_agora: true, status: st,
+      const anotou = marcarSemFull(loja.key, motivo);
+      return { ok: true, sem_full: true, aprendido_agora: anotou, anotacao_falhou: !anotou, status: st,
                motivo: 'a Shopee não gerou documento de Full pra esta loja (' + motivo + ') — anotado; declare ' + (loja.prefixo || '') + '_FBS=1 se ela passar a usar Full',
                periodo: { de: ymdRotulo(start), ate: ymdRotulo(end) } };
     }
