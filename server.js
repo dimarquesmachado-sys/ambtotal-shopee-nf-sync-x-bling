@@ -184,7 +184,9 @@ app.get('/:loja/fbs/ext/buscar', resolverLoja, async (req, res) => {
   if (!fbsAuthOk(req)) return res.status(401).json({ ok: false, erro: 'chave invalida' });
   try {
     const r = await fbsNf.rotina(req.loja, { forcar: String(req.query.forcar || '') === '1' });   /* Codex #18: a rota de busca da extensão também precisa do forçado */
-    res.json({ ok: true, empresa: req.loja.key, resultado: { precisa: r.novas ? (r.novas.saida + r.novas.entrada) > 0 : false, novas: r.novas, emitente: r.emitente, periodo: r.periodo, motivo: r.ok ? undefined : r.motivo } });
+    /* Codex #18: a extensão perdia sem_documento e o motivo quando a rotina saía calma —
+       do outro lado aparecia só 'precisa: false', sem explicar por quê. */
+    res.json({ ok: true, empresa: req.loja.key, resultado: { precisa: r.novas ? (r.novas.saida + r.novas.entrada) > 0 : false, novas: r.novas, emitente: r.emitente, periodo: r.periodo, sem_documento: r.sem_documento || undefined, sem_full: r.sem_full || undefined, motivo: r.motivo } });
   } catch (e) { res.status(500).json({ ok: false, erro: String(e.message || e) }); }
 });
 

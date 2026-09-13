@@ -297,19 +297,13 @@ function gravarImportadas(lojaKey, reg) {
 // ── ROTINA COMPLETA: busca na Shopee → devolve o que há de novo ──
 // Não importa no Bling (isso é a extensão). Grava o ZIP em disco e devolve
 // contagem. A extensão baixa o ZIP de "novas" e sobe no Bling.
-/* memória de 'esta loja não tem Full': gravada quando a Shopee recusa gerar o documento
-   com a loja em modo auto. Some se o dono declarar <PREFIXO>_FBS=1. */
-function arqSemFull(lojaKey) { return path.join(NF_DIR, '_sem-full-' + lojaKey + '.json'); }
-function marcarSemFull(lojaKey, motivo) {
-  /* Codex #18 r2: disco somente-leitura ou cheio fazia a anotação sumir em silêncio, e a
-     resposta ainda dizia 'anotado' — na prática a loja tentaria de novo a cada rodada. */
-  try { ensureDir(NF_DIR); fs.writeFileSync(arqSemFull(lojaKey), JSON.stringify({ em: new Date().toISOString(), motivo })); return true; }
-  catch (e) { console.warn('[fbs] nao consegui anotar sem-Full de ' + lojaKey + ': ' + (e.message || e)); return false; }
-}
-function lerSemFull(lojaKey) {
-  try { return JSON.parse(fs.readFileSync(arqSemFull(lojaKey), 'utf8')); } catch (e) { return null; }
-}
-function limparSemFull(lojaKey) { try { fs.unlinkSync(arqSemFull(lojaKey)); } catch (e) {} }
+/* 13/09, 2ª versão — SEM ADIVINHAÇÃO. A 1ª tentava deduzir, pela MENSAGEM de erro, se a
+   loja tem Full, e gravava isso. Cada rodada de revisão achou um jeito novo de a dedução
+   errar (pane temporária, um tipo de documento recusado entre vários, mensagem genérica de
+   autorização) — e o erro caro é sempre o mesmo: marcar uma loja que TEM Full e ela parar
+   de importar em silêncio. Heurística que precisa de exceção atrás de exceção é desenho
+   ruim. Ficou o que é verdadeiro e barato: a empresa DECLARA, e sem documento no período a
+   rotina sai calma dizendo o que viu — sem memória, sem classificar mensagem, sem risco. */
 
 async function rotina(loja, opts = {}) {
   /* 13/09 — EMPRESA SEM SHOPEE FULL NÃO É ERRO. Só a AMB tem Full hoje; GOOD e Girassol
@@ -320,14 +314,6 @@ async function rotina(loja, opts = {}) {
   if (decl === 'nao') {
     return { ok: true, sem_full: true, motivo: 'esta empresa não usa Shopee Full (declarado em ' + (loja.prefixo || '') + '_FBS=0)' };
   }
-  if (decl === 'auto' && !opts.forcar) {
-    const sf = lerSemFull(loja.key);
-    if (sf) return { ok: true, sem_full: true, aprendido_em: sf.em, motivo: 'a Shopee não gera documento de Full pra esta loja (' + sf.motivo + ') — use &forcar=1 pra tentar de novo, ou declare ' + (loja.prefixo || '') + '_FBS=1' };
-  }
-  if (decl === 'sim') limparSemFull(loja.key);
-  /* Codex #18 (P2): forçado que DER CERTO prova que a loja ganhou Full — a memória tem que
-     sair, senão a próxima rodada automática volta a pular. Limpo no fim, com resultado. */
-  const _eraSemFull = decl === 'auto' && !!lerSemFull(loja.key);
   ensureDir(NF_DIR);
   try { limpar(loja.key); } catch (e) {}   // remove ZIPs antigos com timestamp
   const end = ymdSP();
@@ -350,14 +336,12 @@ async function rotina(loja, opts = {}) {
   }
   requestIds = Array.from(new Set(requestIds.map(Number)));
   if (!requestIds.length) {
-    const dePermissaoG = (m) => /permission|not.*(authoriz|allow)|no.*(fbs|fulfillment)|not.*support|shop.*not.*(enabl|open)|invalid.*shop/i.test(String(m || ''));
-    if (errosGerar.length && errosGerar.every(dePermissaoG) && String(loja.fbs || 'auto') !== 'sim') {
-      const anotou = marcarSemFull(loja.key, errosGerar[0].slice(0, 200));
-      return { ok: true, sem_full: true, aprendido_agora: anotou, anotacao_falhou: !anotou,
-               motivo: 'a Shopee recusou gerar documento de Full pra esta loja (' + errosGerar[0].slice(0, 160) + ')',
-               periodo: { de: ymdRotulo(start), ate: ymdRotulo(end) } };
-    }
-    return { ok: false, motivo: errosGerar.length ? ('falha ao gerar tarefa: ' + errosGerar[0].slice(0, 160)) : 'nenhuma tarefa gerada (sem notas no período?)',
+    /* sem tarefa gerada: pode ser loja sem Full ou período sem nota — em ambos não há o que
+       fazer, e nenhum deles é falha nossa. Sai calmo, com a mensagem da Shopee junto. */
+    return { ok: true, sem_documento: true,
+             motivo: errosGerar.length
+               ? ('a Shopee não gerou documento de Full (' + errosGerar[0].slice(0, 200) + ') — se esta empresa não usa Full, declare ' + (loja.prefixo || '') + '_FBS=0 pra sair do ciclo')
+               : 'nenhuma nota de Full no período',
              periodo: { de: ymdRotulo(start), ate: ymdRotulo(end) } };
   }
 
@@ -366,29 +350,12 @@ async function rotina(loja, opts = {}) {
   // etapa 3: baixa os prontos
   const bufs = await fbsBaixar(loja, st.prontos);
   if (!bufs.length) {
-    /* a Shopee recusar TODOS os pedidos de documento, sem nenhum pronto, é a assinatura de
-       loja sem Full — no modo auto isso vira memória e a rotina para de insistir (e de
-       gastar chamada). Declarada como 'sim', segue reportando erro de verdade. */
-    const todosFalharam = (st.erros || []).length > 0 && !(st.prontos || []).length && !(st.aindaProcessando || []).length;
-    /* Codex #18 (P1): pane TEMPORÁRIA da Shopee também derruba todas as tarefas — marcar
-       'sem Full' nesse caso condenaria uma loja que TEM Full a nunca mais importar, em
-       silêncio, que é pior do que o alarme que eu queria calar. Só marca quando a recusa
-       tem cara de PERMISSÃO/ausência de Full; erro genérico volta a ser erro e o dono vê. */
-    const msgErro = String((st.erros[0] && st.erros[0].msg) || 'FAILED');
-    /* Codex #18 r2 (P1): com vários tipos de documento, olhar SÓ o primeiro erro deixava
-       marcar 'sem Full' quando uma tarefa foi recusada por permissão e as outras caíram
-       por pane — e aí a loja com Full parava de importar em silêncio. Todas as falhas
-       precisam ser de permissão pra conclusão valer. */
-    const dePermissao = (m) => /permission|not.*(authoriz|allow)|no.*(fbs|fulfillment)|not.*support|shop.*not.*(enabl|open)|invalid.*shop/i.test(String(m || ''));
-    const ehFaltaDeFull = (st.erros || []).length > 0 && (st.erros || []).every(e => dePermissao(e && e.msg));
-    if (todosFalharam && ehFaltaDeFull && String(loja.fbs || 'auto') !== 'sim') {
-      const motivo = msgErro;
-      const anotou = marcarSemFull(loja.key, motivo);
-      return { ok: true, sem_full: true, aprendido_agora: anotou, anotacao_falhou: !anotou, status: st,
-               motivo: 'a Shopee não gerou documento de Full pra esta loja (' + motivo + ') — anotado; declare ' + (loja.prefixo || '') + '_FBS=1 se ela passar a usar Full',
-               periodo: { de: ymdRotulo(start), ate: ymdRotulo(end) } };
-    }
-    return { ok: false, motivo: 'nada baixado', status: st, periodo: { de: ymdRotulo(start), ate: ymdRotulo(end) } };
+    const msgs = (st.erros || []).map(e => e && e.msg).filter(Boolean);
+    return { ok: true, sem_documento: true, status: st,
+             motivo: msgs.length
+               ? ('a Shopee recusou os documentos (' + String(msgs[0]).slice(0, 200) + ') — se esta empresa não usa Full, declare ' + (loja.prefixo || '') + '_FBS=0 pra sair do ciclo')
+               : 'nada baixado no período',
+             periodo: { de: ymdRotulo(start), ate: ymdRotulo(end) } };
   }
 
   // separa e deduplica contra o histórico
@@ -419,7 +386,6 @@ async function rotina(loja, opts = {}) {
   }
 
   const deparaAdd = gravarDePara(loja.key, sep.saida.concat(sep.entrada));
-  if (_eraSemFull) limparSemFull(loja.key);   /* baixou nota: a loja tem Full, esqueço a anotação */
   return {
     ok: true,
     periodo: { de: ymdRotulo(start), ate: ymdRotulo(end) },
@@ -513,7 +479,7 @@ function estadoAtual(loja) {
 }
 
 module.exports = {
-  lerDePara, acharPorPedido, nfPedidoLoja, reconstruirDePara, lerSemFull, limparSemFull,
+  lerDePara, acharPorPedido, nfPedidoLoja, reconstruirDePara,
   NF_DIR, rotina, estadoAtual, marcarImportadas, chavesDoZip, caminhoZip, limpar,
   lerImportadas, nfEmitente, nfChave, ymdSP,
   // expostos p/ teste

@@ -24,19 +24,17 @@ const fbs = require('../modules/fbs-nf');
   delete process.env.GIRASSOL_SYNC_FBS;
   assert.strictEqual(getConfigLoja('girassol').fbs, 'auto');
 
-  // 3) auto que JÁ aprendeu: sai limpo, sem gastar chamada, e ensina como reverter
-  const gir = getConfigLoja('girassol');
-  fs.mkdirSync(path.join(process.env.DATA_DIR, 'fbs-nf'), { recursive: true });
-  fs.writeFileSync(path.join(process.env.DATA_DIR, 'fbs-nf', '_sem-full-girassol.json'),
-                   JSON.stringify({ em: '2026-09-13T10:00:00.000Z', motivo: 'FAILED' }));
-  const r3 = await fbs.rotina(gir, {});
-  assert.strictEqual(r3.ok, true);
-  assert.strictEqual(r3.sem_full, true);
-  assert.ok(/forcar=1|_FBS=1/.test(r3.motivo), 'tem que dizer como voltar atrás quando a loja passar a usar Full');
-
-  // 4) declarada COM Full: a memória do 'sem full' não segura mais
+  // 3) declarada COM Full: a rotina segue o caminho normal (erro volta a ser erro)
   process.env.GIRASSOL_SYNC_FBS = '1';
   assert.strictEqual(getConfigLoja('girassol').fbs, 'sim');
 
-  console.log('OK: Full por empresa — declarado não sai limpo, auto aprende e explica como reverter, declarado sim ignora a memória');
+  /* 4) NÃO existe mais adivinhação: a 1ª versão deduzia pela mensagem de erro se a loja
+     tinha Full e gravava isso — três rodadas de revisão acharam jeitos diferentes de a
+     dedução errar, sempre com o mesmo custo (loja COM Full parando de importar em
+     silêncio). Este teste existe pra ninguém reintroduzir a heurística. */
+  const src = fs.readFileSync(path.join(__dirname, '..', 'modules', 'fbs-nf.js'), 'utf8');
+  assert.ok(!/marcarSemFull|lerSemFull|ehFaltaDeFull/.test(src),
+            'a classificação por mensagem de erro não pode voltar — quem decide é a declaração da empresa');
+
+  console.log('OK: Full por empresa — declarado não sai limpo e sem tocar na Shopee, declarado sim segue o fluxo, e a adivinhação por mensagem de erro não voltou');
 })().catch(e => { console.error('FALHOU:', e.message); process.exit(1); });
