@@ -115,6 +115,25 @@ function nfChave(dados, nome) {
 }
 
 // ── Extrai o CNPJ do emitente (pra sabermos de quem é a nota) ──
+/* 13/09 — O NÚMERO DO PEDIDO DA SHOPEE ESTÁ NA NOTA, no campo xPed do ITEM (o DANFE o
+   imprime colado na descrição, e por isso parecia parte do título do produto). Sem ler
+   isso, a NF do Full entrava no Bling sem nenhuma ligação com o pedido: o dono só achou a
+   757/série 5 garimpando pelo nome do cliente, e o robô de envio dava a nota por ausente.
+   É campo próprio da NF-e, então a leitura é exata — não quebra quando a Shopee mudar o
+   nome do produto. */
+function nfPedidoLoja(dados) {
+  try {
+    const txt = dados.toString('utf8');
+    const m = /<xPed>\s*([^<\s]+)\s*<\/xPed>/.exec(txt);
+    if (m && m[1]) return m[1].trim();
+    /* emissor que não usa xPed às vezes joga o pedido na descrição — só como reserva,
+       e exigindo o formato de order_sn da Shopee pra não capturar lixo. */
+    const d = /<xProd>([^<]*)<\/xProd>/.exec(txt);
+    if (d) { const p = /\b(\d{6}[A-Z0-9]{8,10})\b/.exec(d[1]); if (p) return p[1]; }
+    return null;
+  } catch (e) { return null; }
+}
+
 function nfEmitente(dados) {
   const txt = dados.toString('utf8');
   // pega o primeiro <emit>...</emit> e dentro dele o CNPJ e o Nome
@@ -142,7 +161,7 @@ function separarXmls(bufsZip) {
       if (chave) vistos.add(chave);
       const m = /<tpNF>\s*([01])\s*<\/tpNF>/.exec(dados.toString('utf8'));
       const alvo = !m ? indefinido : (m[1] === '1' ? saida : entrada);
-      alvo.push({ nome, dados, chave });
+      alvo.push({ nome, dados, chave, pedido_loja: nfPedidoLoja(dados) });
     }
   }
   return { saida, entrada, indefinido };
@@ -152,6 +171,37 @@ function montarZip(itens) {
   const out = new AdmZip();
   itens.forEach(it => out.addFile(it.nome, it.dados));
   return out.toBuffer();
+}
+
+/* ── DE-PARA NF ↔ PEDIDO DA SHOPEE (13/09) ────────────────────────────────────
+   A NF do Full entra no Bling sem vínculo com o pedido, e a nota autorizada não
+   pode mais ser editada — então o vínculo vive AQUI, em disco, e é consultável
+   pelas duas pontas: "de que pedido é a NF X" e "qual a NF do pedido Y". É o que
+   faltava quando o dono precisou garimpar a 757/série 5 pelo nome do cliente. */
+function arqDePara(lojaKey) { return path.join(NF_DIR, '_depara-pedido-' + lojaKey + '.json'); }
+function lerDePara(lojaKey) {
+  try { return JSON.parse(fs.readFileSync(arqDePara(lojaKey), 'utf8')) || {}; } catch (e) { return {}; }
+}
+function gravarDePara(lojaKey, itens) {
+  const novos = (itens || []).filter(it => it && it.chave && it.pedido_loja);
+  if (!novos.length) return 0;
+  ensureDir(NF_DIR);
+  const mapa = lerDePara(lojaKey);
+  let add = 0;
+  for (const it of novos) {
+    if (!mapa[it.chave]) add++;
+    mapa[it.chave] = { pedido_loja: it.pedido_loja, em: new Date().toISOString() };
+  }
+  try { fs.writeFileSync(arqDePara(lojaKey), JSON.stringify(mapa)); } catch (e) {}
+  return add;
+}
+function acharPorPedido(lojaKey, pedidoLoja) {
+  const alvo = String(pedidoLoja || '').trim().toUpperCase();
+  const mapa = lerDePara(lojaKey);
+  for (const [chave, v] of Object.entries(mapa)) {
+    if (String(v.pedido_loja || '').toUpperCase() === alvo) return { chave, ...v };
+  }
+  return null;
 }
 
 // ── Dedup por chave já importada (arquivo por loja) ──
@@ -224,6 +274,7 @@ async function rotina(loja, opts = {}) {
     escrito.entrada = { nome, qtd: novasEntrada.length };
   }
 
+  const deparaAdd = gravarDePara(loja.key, sep.saida.concat(sep.entrada));
   return {
     ok: true,
     periodo: { de: ymdRotulo(start), ate: ymdRotulo(end) },
@@ -231,6 +282,7 @@ async function rotina(loja, opts = {}) {
     emitente,
     total: { saida: sep.saida.length, entrada: sep.entrada.length, indefinido: sep.indefinido.length },
     novas: { saida: novasSaida.length, entrada: novasEntrada.length },
+    depara_novos: deparaAdd,
     arquivos: escrito
   };
 }
@@ -316,6 +368,7 @@ function estadoAtual(loja) {
 }
 
 module.exports = {
+  lerDePara, acharPorPedido, nfPedidoLoja,
   NF_DIR, rotina, estadoAtual, marcarImportadas, chavesDoZip, caminhoZip, limpar,
   lerImportadas, nfEmitente, nfChave, ymdSP,
   // expostos p/ teste

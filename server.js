@@ -1410,6 +1410,34 @@ app.get('/:loja/resync-nfs', resolverLoja, async (req, res) => {
   res.json({ ok: true, iniciado: true, total: sns.length, loja: lojaKey, acompanhe: `/${lojaKey}/resync-nfs?status=1&k=SUA_ADMIN_KEY` });
 });
 
+/* 13/09 — CONSULTA DO VÍNCULO NF ↔ PEDIDO DA SHOPEE (Full). A nota do Full entra no
+   Bling sem ligação com o pedido e, autorizada, não pode mais ser editada — o vínculo
+   vive no nosso disco, lido do campo xPed do XML. Aceita os dois sentidos:
+     ?pedido=260913V6QR393P  → devolve a chave da NF
+     ?chave=3526...4594      → devolve o pedido da Shopee
+   Sem parâmetro, devolve o mapa inteiro da loja (últimos primeiro). */
+app.get('/:loja/nf-pedido', resolverLoja, async (req, res) => {
+  if (!adminOk(req)) return res.status(404).send('Not found');
+  try {
+    const pedido = String(req.query.pedido || '').trim();
+    const chave = String(req.query.chave || '').trim();
+    if (pedido) {
+      const r = fbsNf.acharPorPedido(req.loja.key, pedido);
+      return res.json(r ? { ok: true, pedido_loja: pedido, chave_nfe: r.chave, registrado_em: r.em }
+                        : { ok: false, pedido_loja: pedido, erro: 'sem NF registrada para esse pedido (a importação do Full ainda não passou por ele)' });
+    }
+    if (chave) {
+      const v = fbsNf.lerDePara(req.loja.key)[chave];
+      return res.json(v ? { ok: true, chave_nfe: chave, pedido_loja: v.pedido_loja, registrado_em: v.em }
+                        : { ok: false, chave_nfe: chave, erro: 'chave não registrada' });
+    }
+    const mapa = fbsNf.lerDePara(req.loja.key);
+    const lista = Object.entries(mapa).map(([c, v]) => ({ chave_nfe: c, pedido_loja: v.pedido_loja, em: v.em }))
+      .sort((a, b) => String(b.em || '').localeCompare(String(a.em || ''))).slice(0, 200);
+    res.json({ ok: true, loja: req.loja.key, total: Object.keys(mapa).length, registros: lista });
+  } catch (e) { res.status(500).json({ erro: e.message }); }
+});
+
 app.get('/logs', async (req, res) => {
   if (!adminOk(req)) return res.status(404).send('Not found'); // protegido: exige ?k=ADMIN_KEY
   try {
