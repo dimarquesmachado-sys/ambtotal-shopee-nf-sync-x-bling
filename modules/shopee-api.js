@@ -397,6 +397,27 @@ async function checarProntidaoEnvio(loja, orderSn) {
   return { pronto: false, jaArranjado: false, status: orderStatus };
 }
 
+/* 13/09 — PEDIDO DO SHOPEE FULL (FBS) NÃO É NOSSO PRA ENVIAR. O dono investigou três
+   `sem_nf_bling` e todos eram Full: nesses, quem guarda, embala e despacha é a Shopee, e a
+   NF-e é emitida por ELA — nós só importamos o XML pro Bling depois (por isso a nota existe
+   sem estar vinculada ao pedido, e o robô a dava por ausente). Não há envio a organizar nem
+   NF a subir; insistir só gera alarme falso e esconde os pedidos que REALMENTE travaram. */
+async function ehPedidoFull(loja, orderSn) {
+  try {
+    const dets = await buscarDetalhesPedidos(loja, [orderSn]);
+    const d = Array.isArray(dets) ? dets[0] : null;
+    if (!d) return { full: false, motivo: 'sem detalhe' };
+    const pkg = (d.package_list && d.package_list[0]) || {};
+    const alvos = [d.fulfillment_flag, pkg.fulfillment_flag, d.shipping_carrier, pkg.shipping_carrier]
+      .map(x => String(x || '').toLowerCase());
+    const full = alvos.some(t => t.includes('fulfilled_by_shopee') || t === 'full' || t.startsWith('full'));
+    return { full, motivo: alvos.filter(Boolean).join(' | ') || 'sem marcador' };
+  } catch (e) {
+    /* na dúvida NÃO pula: melhor um alarme falso do que deixar pedido de verdade parado */
+    return { full: false, motivo: 'erro: ' + String(e.message || e).slice(0, 120) };
+  }
+}
+
 async function shipOrder(loja, orderSn) {
   const sp = await getShippingParameter(loja, orderSn);
 
@@ -654,6 +675,7 @@ async function escrowPedido(loja, orderSn) {
 }
 
 module.exports = {
+  ehPedidoFull,
   etiquetaPedido,
   escrowPedido,
   refreshShopeeToken,
