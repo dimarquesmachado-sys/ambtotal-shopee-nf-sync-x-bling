@@ -189,12 +189,87 @@ function gravarDePara(lojaKey, itens) {
   const mapa = lerDePara(lojaKey);
   let add = 0;
   for (const it of novos) {
-    if (!mapa[it.chave]) add++;
-    mapa[it.chave] = { pedido_loja: it.pedido_loja, em: new Date().toISOString() };
+    const antigo = mapa[it.chave];
+    if (!antigo) add++;
+    /* Codex #17: reconstrução re-escrevia TODOS os vínculos com a data de agora, apagando
+       quando cada um foi visto pela primeira vez — e esse carimbo é justamente o que diz
+       se um vínculo é antigo ou acabou de entrar. Só muda quando o valor muda. */
+    mapa[it.chave] = (antigo && antigo.pedido_loja === it.pedido_loja)
+      ? antigo
+      : { pedido_loja: it.pedido_loja, em: new Date().toISOString() };
   }
-  try { fs.writeFileSync(arqDePara(lojaKey), JSON.stringify(mapa)); } catch (e) {}
+  /* Codex #17: disco cheio ou somente-leitura fazia o write falhar em silêncio e a
+     resposta anunciava sucesso — quem chamou precisa saber que NADA foi gravado. */
+  /* Codex #17 r2 (P1): escrever direto no mapa vivo significa que disco cheio no meio da
+     escrita deixa o arquivo TRUNCADO — perdendo vínculos que já existiam. Grava no tmp e
+     renomeia (o rename é atômico): ou o mapa novo entra inteiro, ou o antigo continua. */
+  const arq = arqDePara(lojaKey);
+  try {
+    fs.writeFileSync(arq + '.tmp', JSON.stringify(mapa));
+    fs.renameSync(arq + '.tmp', arq);
+  } catch (e) {
+    try { fs.unlinkSync(arq + '.tmp'); } catch (e2) {}
+    const err = new Error('nao consegui gravar o de-para: ' + String(e.message || e).slice(0, 160));
+    err.naoGravou = true; throw err;
+  }
   return add;
 }
+/* 13/09 — PREENCHER O PASSADO. O de-para só nasce quando a importação roda, então as
+   notas do Full já baixadas ficariam de fora. Esta varredura abre os ZIPs que estão em
+   disco, lê o xPed de cada XML e completa o mapa — sem falar com a Shopee, sem baixar
+   nada de novo e sem tocar no Bling. Idempotente: chave já registrada é reescrita com o
+   mesmo valor. */
+function reconstruirDePara(lojaKey) {
+  let nomes = [];
+  try { nomes = fs.readdirSync(NF_DIR); } catch (e) { return { ok: false, erro: 'pasta de NFs não existe ainda' }; }
+  const zips = nomes.filter(n => n.startsWith(lojaKey + '-') && /\.zip$/i.test(n));
+  let xmls = 0, comPedido = 0, semPedido = 0, ruins = 0, zipsRuins = 0, semChave = 0;
+  /* Codex #17 r2 (P1): a rotina APAGA os ZIPs antigos (limpar()), então esta varredura só
+     alcança o que ainda está em disco — prometer 'preencher o passado' sem dizer até onde
+     seria mentira. A resposta declara a janela coberta; nota mais velha que isso só volta
+     se a Shopee for consultada de novo. */
+  let maisVelho = null, maisNovo = null;
+  for (const n of zips) {
+    try {
+      const st = fs.statSync(path.join(NF_DIR, n));
+      const t = st.mtime.toISOString();
+      if (!maisVelho || t < maisVelho) maisVelho = t;
+      if (!maisNovo || t > maisNovo) maisNovo = t;
+    } catch (e) {}
+  }
+  const itens = [];
+  for (const n of zips) {
+    try {
+      const zip = new AdmZip(path.join(NF_DIR, n));
+      for (const e of zip.getEntries()) {
+        if (!/\.xml$/i.test(e.entryName)) continue;
+        /* Codex #17: um XML danificado estourava pro catch do ZIP inteiro e todos os
+           seguintes eram perdidos em silêncio — um arquivo ruim escondia dezenas de bons. */
+        let dados;
+        try { dados = e.getData(); } catch (err) { ruins++; continue; }
+        const chave = nfChave(dados, e.entryName);
+        if (!chave) { semChave++; continue; }   /* Codex #17 r2: XML sem chave legível também conta */
+        xmls++;
+        const ped = nfPedidoLoja(dados);
+        if (ped) { comPedido++; itens.push({ chave, pedido_loja: ped }); } else semPedido++;
+      }
+    } catch (err) { zipsRuins++; /* Codex #17 r2: ZIP ilegível agora é CONTADO, não some em silêncio */ }
+  }
+  let add = 0;
+  try { add = gravarDePara(lojaKey, itens); }
+  catch (e) {
+    return { ok: false, loja: lojaKey, zips: zips.length, zip_ilegivel: zipsRuins, xmls, com_pedido: comPedido,
+             sem_pedido: semPedido, sem_chave: semChave, xml_ilegivel: ruins,
+             janela_em_disco: { mais_velho: maisVelho, mais_novo: maisNovo },
+             erro: e.message, aviso: 'NADA foi gravado — o mapa segue como estava' };
+  }
+  return { ok: true, loja: lojaKey, zips: zips.length, zip_ilegivel: zipsRuins, xmls, com_pedido: comPedido,
+           sem_pedido: semPedido, sem_chave: semChave, xml_ilegivel: ruins,
+           janela_em_disco: { mais_velho: maisVelho, mais_novo: maisNovo },
+           aviso: 'a rotina apaga ZIPs antigos — nota anterior à janela acima só volta consultando a Shopee de novo',
+           novos_no_mapa: add, total_no_mapa: Object.keys(lerDePara(lojaKey)).length };
+}
+
 function acharPorPedido(lojaKey, pedidoLoja) {
   const alvo = String(pedidoLoja || '').trim().toUpperCase();
   const mapa = lerDePara(lojaKey);
@@ -368,7 +443,7 @@ function estadoAtual(loja) {
 }
 
 module.exports = {
-  lerDePara, acharPorPedido, nfPedidoLoja,
+  lerDePara, acharPorPedido, nfPedidoLoja, reconstruirDePara,
   NF_DIR, rotina, estadoAtual, marcarImportadas, chavesDoZip, caminhoZip, limpar,
   lerImportadas, nfEmitente, nfChave, ymdSP,
   // expostos p/ teste

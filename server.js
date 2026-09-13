@@ -1431,6 +1431,10 @@ app.get('/:loja/nf-pedido', resolverLoja, async (req, res) => {
       return res.json(v ? { ok: true, chave_nfe: chave, pedido_loja: v.pedido_loja, registrado_em: v.em }
                         : { ok: false, chave_nfe: chave, erro: 'chave não registrada' });
     }
+    /* ?reconstruir=1 varre os ZIPs já baixados e completa o mapa com o passado */
+    if (String(req.query.reconstruir || '') === '1') {
+      return res.json(fbsNf.reconstruirDePara(req.loja.key));
+    }
     const mapa = fbsNf.lerDePara(req.loja.key);
     const lista = Object.entries(mapa).map(([c, v]) => ({ chave_nfe: c, pedido_loja: v.pedido_loja, em: v.em }))
       .sort((a, b) => String(b.em || '').localeCompare(String(a.em || ''))).slice(0, 200);
