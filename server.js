@@ -977,6 +977,24 @@ app.get('/:loja/interno/pedidos-do-dia', resolverLoja, async (req, res) => {
   }
 });
 
+/* 13/09 — QUEM CANCELA É A SHOPEE, e o Bling é espelho: espelho pode não refletir. O
+   dono pediu a fonte da verdade depois do caso do 4645 (cancelado por falta de pagamento).
+   Esta rota pergunta à Shopee QUAIS pedidos foram cancelados no período — uma listagem
+   paginada, barata, sem escrow — pra o checkout marcar no índice sem depender do Bling. */
+app.get('/:loja/interno/cancelados', resolverLoja, async (req, res) => {
+  const chavesOk = [process.env.INTERNAL_KEY, process.env.ADMIN_KEY].filter(Boolean).map(s => String(s).trim());
+  const k = String(req.query.k || '').trim();
+  if (!chavesOk.length || !chavesOk.includes(k)) return res.status(404).send('Not found');
+  try {
+    const dias = Math.max(1, Math.min(60, Number(req.query.dias) || 30));
+    const lista = await shopee.listarPedidosPorStatus(req.loja, 'CANCELLED', dias);
+    const sns = (lista || []).map(x => (typeof x === 'string' ? x : (x && (x.order_sn || x.orderSn)))).filter(Boolean);
+    res.json({ ok: true, loja: req.loja.key, dias, total: sns.length, order_sns: sns });
+  } catch (e) {
+    res.status(500).json({ ok: false, erro: String(e.message || e).slice(0, 300) });
+  }
+});
+
 app.get('/:loja/interno/margem-pedidos', resolverLoja, async (req, res) => {
   // v2.4.1 - aceita INTERNAL_KEY ou ADMIN_KEY deste servico; tolera espaco copiado
   // nas pontas e o classico '+' da chave que o navegador transforma em espaco no ?k=
