@@ -22,6 +22,14 @@ async function processarPedido(loja, orderSn, opts = {}) {
 
   const nfeId = await bling.buscarNfPorPedido(loja, pedidoBling.id);
   if (!nfeId) {
+    /* 13/09: antes de gritar 'sem NF', conferir se é FULL — nesses a Shopee emite a NF-e e
+       despacha do armazém dela; a nota entra no Bling pelo XML que importamos, sem vínculo
+       com o pedido. Três alarmes de 11 a 13/09 eram exatamente isso. */
+    const ff = await shopee.ehPedidoFull(loja, orderSn);
+    if (ff.full) {
+      return { order_sn: orderSn, loja: loja.key, pedido_bling_id: pedidoBling.id,
+               status: 'full_shopee_ignorado', detalhe: 'Shopee Full (' + ff.motivo + '): envio e NF-e são da Shopee' };
+    }
     return { order_sn: orderSn, loja: loja.key, pedido_bling_id: pedidoBling.id, status: 'sem_nf_bling' };
   }
 
