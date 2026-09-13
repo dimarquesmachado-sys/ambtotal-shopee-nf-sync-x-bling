@@ -982,8 +982,13 @@ app.get('/:loja/interno/pedidos-do-dia', resolverLoja, async (req, res) => {
    Esta rota pergunta à Shopee QUAIS pedidos foram cancelados no período — uma listagem
    paginada, barata, sem escrow — pra o checkout marcar no índice sem depender do Bling. */
 app.get('/:loja/interno/cancelados', resolverLoja, async (req, res) => {
+  /* Codex #19: aceitar as MESMAS formas de chave interna que as outras rotas de máquina —
+     query, header x-internal-key e Authorization: Bearer — senão um chamador que segue o
+     padrão da casa leva 404 e o motivo fica invisível. */
   const chavesOk = [process.env.INTERNAL_KEY, process.env.ADMIN_KEY].filter(Boolean).map(s => String(s).trim());
-  const k = String(req.query.k || '').trim();
+  const kHdr = String(req.headers['x-internal-key'] || '').trim();
+  const kAuth = String(req.headers['authorization'] || '').replace(/^Bearer\s+/i, '').trim();
+  const k = String(req.query.k || '').trim() || kHdr || kAuth;
   if (!chavesOk.length || !chavesOk.includes(k)) return res.status(404).send('Not found');
   try {
     const dias = Math.max(1, Math.min(60, Number(req.query.dias) || 30));
