@@ -200,8 +200,18 @@ function gravarDePara(lojaKey, itens) {
   }
   /* Codex #17: disco cheio ou somente-leitura fazia o write falhar em silêncio e a
      resposta anunciava sucesso — quem chamou precisa saber que NADA foi gravado. */
-  try { fs.writeFileSync(arqDePara(lojaKey), JSON.stringify(mapa)); }
-  catch (e) { const err = new Error('nao consegui gravar o de-para: ' + String(e.message || e).slice(0, 160)); err.naoGravou = true; throw err; }
+  /* Codex #17 r2 (P1): escrever direto no mapa vivo significa que disco cheio no meio da
+     escrita deixa o arquivo TRUNCADO — perdendo vínculos que já existiam. Grava no tmp e
+     renomeia (o rename é atômico): ou o mapa novo entra inteiro, ou o antigo continua. */
+  const arq = arqDePara(lojaKey);
+  try {
+    fs.writeFileSync(arq + '.tmp', JSON.stringify(mapa));
+    fs.renameSync(arq + '.tmp', arq);
+  } catch (e) {
+    try { fs.unlinkSync(arq + '.tmp'); } catch (e2) {}
+    const err = new Error('nao consegui gravar o de-para: ' + String(e.message || e).slice(0, 160));
+    err.naoGravou = true; throw err;
+  }
   return add;
 }
 /* 13/09 — PREENCHER O PASSADO. O de-para só nasce quando a importação roda, então as
@@ -213,7 +223,20 @@ function reconstruirDePara(lojaKey) {
   let nomes = [];
   try { nomes = fs.readdirSync(NF_DIR); } catch (e) { return { ok: false, erro: 'pasta de NFs não existe ainda' }; }
   const zips = nomes.filter(n => n.startsWith(lojaKey + '-') && /\.zip$/i.test(n));
-  let xmls = 0, comPedido = 0, semPedido = 0, ruins = 0;
+  let xmls = 0, comPedido = 0, semPedido = 0, ruins = 0, zipsRuins = 0, semChave = 0;
+  /* Codex #17 r2 (P1): a rotina APAGA os ZIPs antigos (limpar()), então esta varredura só
+     alcança o que ainda está em disco — prometer 'preencher o passado' sem dizer até onde
+     seria mentira. A resposta declara a janela coberta; nota mais velha que isso só volta
+     se a Shopee for consultada de novo. */
+  let maisVelho = null, maisNovo = null;
+  for (const n of zips) {
+    try {
+      const st = fs.statSync(path.join(NF_DIR, n));
+      const t = st.mtime.toISOString();
+      if (!maisVelho || t < maisVelho) maisVelho = t;
+      if (!maisNovo || t > maisNovo) maisNovo = t;
+    } catch (e) {}
+  }
   const itens = [];
   for (const n of zips) {
     try {
@@ -225,21 +248,26 @@ function reconstruirDePara(lojaKey) {
         let dados;
         try { dados = e.getData(); } catch (err) { ruins++; continue; }
         const chave = nfChave(dados, e.entryName);
-        if (!chave) continue;
+        if (!chave) { semChave++; continue; }   /* Codex #17 r2: XML sem chave legível também conta */
         xmls++;
         const ped = nfPedidoLoja(dados);
         if (ped) { comPedido++; itens.push({ chave, pedido_loja: ped }); } else semPedido++;
       }
-    } catch (err) { /* zip corrompido não interrompe o resto */ }
+    } catch (err) { zipsRuins++; /* Codex #17 r2: ZIP ilegível agora é CONTADO, não some em silêncio */ }
   }
   let add = 0;
   try { add = gravarDePara(lojaKey, itens); }
   catch (e) {
-    return { ok: false, loja: lojaKey, zips: zips.length, xmls, com_pedido: comPedido, sem_pedido: semPedido,
-             xml_ilegivel: ruins, erro: e.message, aviso: 'NADA foi gravado — o mapa segue como estava' };
+    return { ok: false, loja: lojaKey, zips: zips.length, zip_ilegivel: zipsRuins, xmls, com_pedido: comPedido,
+             sem_pedido: semPedido, sem_chave: semChave, xml_ilegivel: ruins,
+             janela_em_disco: { mais_velho: maisVelho, mais_novo: maisNovo },
+             erro: e.message, aviso: 'NADA foi gravado — o mapa segue como estava' };
   }
-  return { ok: true, loja: lojaKey, zips: zips.length, xmls, com_pedido: comPedido, sem_pedido: semPedido,
-           xml_ilegivel: ruins, novos_no_mapa: add, total_no_mapa: Object.keys(lerDePara(lojaKey)).length };
+  return { ok: true, loja: lojaKey, zips: zips.length, zip_ilegivel: zipsRuins, xmls, com_pedido: comPedido,
+           sem_pedido: semPedido, sem_chave: semChave, xml_ilegivel: ruins,
+           janela_em_disco: { mais_velho: maisVelho, mais_novo: maisNovo },
+           aviso: 'a rotina apaga ZIPs antigos — nota anterior à janela acima só volta consultando a Shopee de novo',
+           novos_no_mapa: add, total_no_mapa: Object.keys(lerDePara(lojaKey)).length };
 }
 
 function acharPorPedido(lojaKey, pedidoLoja) {
