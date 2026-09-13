@@ -189,10 +189,19 @@ function gravarDePara(lojaKey, itens) {
   const mapa = lerDePara(lojaKey);
   let add = 0;
   for (const it of novos) {
-    if (!mapa[it.chave]) add++;
-    mapa[it.chave] = { pedido_loja: it.pedido_loja, em: new Date().toISOString() };
+    const antigo = mapa[it.chave];
+    if (!antigo) add++;
+    /* Codex #17: reconstrução re-escrevia TODOS os vínculos com a data de agora, apagando
+       quando cada um foi visto pela primeira vez — e esse carimbo é justamente o que diz
+       se um vínculo é antigo ou acabou de entrar. Só muda quando o valor muda. */
+    mapa[it.chave] = (antigo && antigo.pedido_loja === it.pedido_loja)
+      ? antigo
+      : { pedido_loja: it.pedido_loja, em: new Date().toISOString() };
   }
-  try { fs.writeFileSync(arqDePara(lojaKey), JSON.stringify(mapa)); } catch (e) {}
+  /* Codex #17: disco cheio ou somente-leitura fazia o write falhar em silêncio e a
+     resposta anunciava sucesso — quem chamou precisa saber que NADA foi gravado. */
+  try { fs.writeFileSync(arqDePara(lojaKey), JSON.stringify(mapa)); }
+  catch (e) { const err = new Error('nao consegui gravar o de-para: ' + String(e.message || e).slice(0, 160)); err.naoGravou = true; throw err; }
   return add;
 }
 /* 13/09 — PREENCHER O PASSADO. O de-para só nasce quando a importação roda, então as
@@ -204,14 +213,17 @@ function reconstruirDePara(lojaKey) {
   let nomes = [];
   try { nomes = fs.readdirSync(NF_DIR); } catch (e) { return { ok: false, erro: 'pasta de NFs não existe ainda' }; }
   const zips = nomes.filter(n => n.startsWith(lojaKey + '-') && /\.zip$/i.test(n));
-  let xmls = 0, comPedido = 0, semPedido = 0;
+  let xmls = 0, comPedido = 0, semPedido = 0, ruins = 0;
   const itens = [];
   for (const n of zips) {
     try {
       const zip = new AdmZip(path.join(NF_DIR, n));
       for (const e of zip.getEntries()) {
         if (!/\.xml$/i.test(e.entryName)) continue;
-        const dados = e.getData();
+        /* Codex #17: um XML danificado estourava pro catch do ZIP inteiro e todos os
+           seguintes eram perdidos em silêncio — um arquivo ruim escondia dezenas de bons. */
+        let dados;
+        try { dados = e.getData(); } catch (err) { ruins++; continue; }
         const chave = nfChave(dados, e.entryName);
         if (!chave) continue;
         xmls++;
@@ -220,9 +232,14 @@ function reconstruirDePara(lojaKey) {
       }
     } catch (err) { /* zip corrompido não interrompe o resto */ }
   }
-  const add = gravarDePara(lojaKey, itens);
+  let add = 0;
+  try { add = gravarDePara(lojaKey, itens); }
+  catch (e) {
+    return { ok: false, loja: lojaKey, zips: zips.length, xmls, com_pedido: comPedido, sem_pedido: semPedido,
+             xml_ilegivel: ruins, erro: e.message, aviso: 'NADA foi gravado — o mapa segue como estava' };
+  }
   return { ok: true, loja: lojaKey, zips: zips.length, xmls, com_pedido: comPedido, sem_pedido: semPedido,
-           novos_no_mapa: add, total_no_mapa: Object.keys(lerDePara(lojaKey)).length };
+           xml_ilegivel: ruins, novos_no_mapa: add, total_no_mapa: Object.keys(lerDePara(lojaKey)).length };
 }
 
 function acharPorPedido(lojaKey, pedidoLoja) {
