@@ -107,7 +107,7 @@ app.get('/:loja/fbs/rodar', resolverLoja, async (req, res) => {
   if (!fbsAuthOk(req)) return res.status(401).json({ ok: false, erro: 'chave invalida (ADMIN_KEY ou INTERNAL_KEY deste servico)' });
   try {
     const dias = req.query.dias ? Number(req.query.dias) : undefined;
-    const r = await fbsNf.rotina(req.loja, { dias });
+    const r = await fbsNf.rotina(req.loja, { forcar: String(req.query.forcar || '') === '1', dias });
     try { fbsNf.limpar(req.loja.key); } catch (e) {}
     res.json({ ok: true, loja: req.loja.key, resultado: r });
   } catch (e) { res.status(500).json({ ok: false, erro: String(e.message || e) }); }
@@ -183,8 +183,10 @@ app.get('/:loja/fbs/ext/estado', resolverLoja, async (req, res) => {
 app.get('/:loja/fbs/ext/buscar', resolverLoja, async (req, res) => {
   if (!fbsAuthOk(req)) return res.status(401).json({ ok: false, erro: 'chave invalida' });
   try {
-    const r = await fbsNf.rotina(req.loja, {});
-    res.json({ ok: true, empresa: req.loja.key, resultado: { precisa: r.novas ? (r.novas.saida + r.novas.entrada) > 0 : false, novas: r.novas, emitente: r.emitente, periodo: r.periodo, motivo: r.ok ? undefined : r.motivo } });
+    const r = await fbsNf.rotina(req.loja, { forcar: String(req.query.forcar || '') === '1' });   /* Codex #18: a rota de busca da extensão também precisa do forçado */
+    /* Codex #18: a extensão perdia sem_documento e o motivo quando a rotina saía calma —
+       do outro lado aparecia só 'precisa: false', sem explicar por quê. */
+    res.json({ ok: true, empresa: req.loja.key, resultado: { precisa: r.novas ? (r.novas.saida + r.novas.entrada) > 0 : false, novas: r.novas, emitente: r.emitente, periodo: r.periodo, sem_documento: r.sem_documento || undefined, sem_full: r.sem_full || undefined, motivo: r.motivo } });
   } catch (e) { res.status(500).json({ ok: false, erro: String(e.message || e) }); }
 });
 
@@ -1523,7 +1525,10 @@ try {
         const loja = getConfigLoja(key);
         const r = await fbsNf.rotina(loja, {});
         const n = r.novas ? (r.novas.saida + r.novas.entrada) : 0;
-        console.log(`[fbs-cron] ${key}: ${r.ok ? (n + ' nova(s)') : ('sem notas — ' + (r.motivo || ''))} (período ${r.periodo ? r.periodo.de + '..' + r.periodo.ate : '?'})`);
+        /* 13/09: loja sem Shopee Full sai do log como INFORMAÇÃO, não como falha — só a AMB
+           tem Full hoje, e o ruído das outras escondia problema de verdade. */
+        if (r.sem_full) console.log(`[fbs-cron] ${key}: sem Shopee Full — ${r.motivo}`);
+        else console.log(`[fbs-cron] ${key}: ${r.ok ? (n + ' nova(s)') : ('sem notas — ' + (r.motivo || ''))} (período ${r.periodo ? r.periodo.de + '..' + r.periodo.ate : '?'})`);
       } catch (e) { console.error(`[fbs-cron] ${key} falhou:`, e.message); }
       await new Promise(r => setTimeout(r, 3000)); // respiro entre lojas
     }

@@ -297,7 +297,23 @@ function gravarImportadas(lojaKey, reg) {
 // ── ROTINA COMPLETA: busca na Shopee → devolve o que há de novo ──
 // Não importa no Bling (isso é a extensão). Grava o ZIP em disco e devolve
 // contagem. A extensão baixa o ZIP de "novas" e sobe no Bling.
+/* 13/09, 2ª versão — SEM ADIVINHAÇÃO. A 1ª tentava deduzir, pela MENSAGEM de erro, se a
+   loja tem Full, e gravava isso. Cada rodada de revisão achou um jeito novo de a dedução
+   errar (pane temporária, um tipo de documento recusado entre vários, mensagem genérica de
+   autorização) — e o erro caro é sempre o mesmo: marcar uma loja que TEM Full e ela parar
+   de importar em silêncio. Heurística que precisa de exceção atrás de exceção é desenho
+   ruim. Ficou o que é verdadeiro e barato: a empresa DECLARA, e sem documento no período a
+   rotina sai calma dizendo o que viu — sem memória, sem classificar mensagem, sem risco. */
+
 async function rotina(loja, opts = {}) {
+  /* 13/09 — EMPRESA SEM SHOPEE FULL NÃO É ERRO. Só a AMB tem Full hoje; GOOD e Girassol
+     devolviam FAILED na geração do documento, o que parecia falha e era ausência. Com a
+     empresa declarando (<PREFIXO>_FBS=0) ou com o serviço aprendendo sozinho no modo auto,
+     a rotina sai limpa em vez de gritar — e a próxima empresa entra sem herdar alarme. */
+  const decl = String(loja.fbs || 'auto');
+  if (decl === 'nao') {
+    return { ok: true, sem_full: true, motivo: 'esta empresa não usa Shopee Full (declarado em ' + (loja.prefixo || '') + '_FBS=0)' };
+  }
   ensureDir(NF_DIR);
   try { limpar(loja.key); } catch (e) {}   // remove ZIPs antigos com timestamp
   const end = ymdSP();
@@ -308,19 +324,39 @@ async function rotina(loja, opts = {}) {
 
   // etapa 1: gera tarefas de cada tipo de documento pedido
   let requestIds = [];
+  const errosGerar = [];   /* Codex #18 r2: recusa na geração também ensina */
   for (const dt of tiposDoc()) {
+    /* Codex #18 r2 (P2): loja sem Full costuma ser recusada JÁ NA GERAÇÃO da tarefa — o
+       erro caía neste catch, virava 'nenhuma tarefa gerada (sem notas no período?)' e o
+       aprendizado nunca acontecia, deixando a rotina tentar pra sempre. As mensagens são
+       guardadas pra a mesma regra de permissão decidir logo abaixo. */
     try { const ids = await fbsGerar(loja, start, end, dt, fileType, docStatus); requestIds.push(...ids); }
-    catch (e) { console.error(`[fbs-nf][${loja.key}] gerar tipo ${dt}: ${e.message}`); }
+    catch (e) { errosGerar.push(String(e.message || e)); console.error(`[fbs-nf][${loja.key}] gerar tipo ${dt}: ${e.message}`); }
     await sleep(400);
   }
   requestIds = Array.from(new Set(requestIds.map(Number)));
-  if (!requestIds.length) return { ok: false, motivo: 'nenhuma tarefa gerada (sem notas no período?)', periodo: { de: ymdRotulo(start), ate: ymdRotulo(end) } };
+  if (!requestIds.length) {
+    /* sem tarefa gerada: pode ser loja sem Full ou período sem nota — em ambos não há o que
+       fazer, e nenhum deles é falha nossa. Sai calmo, com a mensagem da Shopee junto. */
+    return { ok: true, sem_documento: true,
+             motivo: errosGerar.length
+               ? ('a Shopee não gerou documento de Full (' + errosGerar[0].slice(0, 200) + ') — se esta empresa não usa Full, declare ' + (loja.prefixo || '') + '_FBS=0 pra sair do ciclo')
+               : 'nenhuma nota de Full no período',
+             periodo: { de: ymdRotulo(start), ate: ymdRotulo(end) } };
+  }
 
   // etapa 2: espera ficar pronto
   const st = await fbsAguardar(loja, requestIds);
   // etapa 3: baixa os prontos
   const bufs = await fbsBaixar(loja, st.prontos);
-  if (!bufs.length) return { ok: false, motivo: 'nada baixado', status: st, periodo: { de: ymdRotulo(start), ate: ymdRotulo(end) } };
+  if (!bufs.length) {
+    const msgs = (st.erros || []).map(e => e && e.msg).filter(Boolean);
+    return { ok: true, sem_documento: true, status: st,
+             motivo: msgs.length
+               ? ('a Shopee recusou os documentos (' + String(msgs[0]).slice(0, 200) + ') — se esta empresa não usa Full, declare ' + (loja.prefixo || '') + '_FBS=0 pra sair do ciclo')
+               : 'nada baixado no período',
+             periodo: { de: ymdRotulo(start), ate: ymdRotulo(end) } };
+  }
 
   // separa e deduplica contra o histórico
   const sep = separarXmls(bufs);
