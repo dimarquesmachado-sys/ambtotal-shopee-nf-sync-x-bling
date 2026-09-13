@@ -189,6 +189,7 @@ async function listarPedidosPorStatus(loja, orderStatus, diasAtras = 7, opts = {
   const JANELA = 15 * 86400;                       /* teto da Shopee */
   const todos = [];
   const vistos = new Set();
+  const truncadas = [];
   for (let de = ini0; de < fim0; de += JANELA) {
     const ate = Math.min(de + JANELA - 1, fim0);
     let cursor = '';
@@ -200,8 +201,16 @@ async function listarPedidosPorStatus(loja, orderStatus, diasAtras = 7, opts = {
       }
       if (!lote.more || !lote.cursor) break;
       cursor = lote.cursor;
+      /* Codex #19 r2: bater no teto de 50 páginas com `more` ainda true significa que a
+         fatia foi TRUNCADA — e devolver a lista curta em silêncio faria a varredura
+         concluir com menos cancelados do que existem, exatamente o tipo de número
+         faltando que passa despercebido. Marca e deixa o chamador ver. */
+      if (pg === 49 && lote.more) {
+        truncadas.push({ de: new Date(de * 1000).toISOString().slice(0, 10), ate: new Date(ate * 1000).toISOString().slice(0, 10) });
+      }
     }
   }
+  if (truncadas.length) todos.truncado = truncadas;
   return todos;
 }
 

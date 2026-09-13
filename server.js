@@ -994,7 +994,12 @@ app.get('/:loja/interno/cancelados', resolverLoja, async (req, res) => {
     const dias = Math.max(1, Math.min(60, Number(req.query.dias) || 30));
     const lista = await shopee.listarPedidosPorStatus(req.loja, 'CANCELLED', dias);
     const sns = (lista || []).map(x => (typeof x === 'string' ? x : (x && (x.order_sn || x.orderSn)))).filter(Boolean);
-    res.json({ ok: true, loja: req.loja.key, dias, total: sns.length, order_sns: sns });
+    /* Codex #19 r2: se alguma fatia bateu no teto de páginas, a lista está INCOMPLETA —
+       quem consome precisa saber, senão conclui "só isso de cancelado" e erra pra menos. */
+    const truncado = (lista && lista.truncado) || null;
+    res.json({ ok: true, loja: req.loja.key, dias, total: sns.length, order_sns: sns,
+               truncado: truncado || undefined,
+               aviso: truncado ? 'lista INCOMPLETA: fatias truncadas no teto de páginas — rode com menos dias' : undefined });
   } catch (e) {
     res.status(500).json({ ok: false, erro: String(e.message || e).slice(0, 300) });
   }
