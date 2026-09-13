@@ -1523,7 +1523,10 @@ try {
         const loja = getConfigLoja(key);
         const r = await fbsNf.rotina(loja, {});
         const n = r.novas ? (r.novas.saida + r.novas.entrada) : 0;
-        console.log(`[fbs-cron] ${key}: ${r.ok ? (n + ' nova(s)') : ('sem notas — ' + (r.motivo || ''))} (período ${r.periodo ? r.periodo.de + '..' + r.periodo.ate : '?'})`);
+        /* 13/09: loja sem Shopee Full sai do log como INFORMAÇÃO, não como falha — só a AMB
+           tem Full hoje, e o ruído das outras escondia problema de verdade. */
+        if (r.sem_full) console.log(`[fbs-cron] ${key}: sem Shopee Full — ${r.motivo}`);
+        else console.log(`[fbs-cron] ${key}: ${r.ok ? (n + ' nova(s)') : ('sem notas — ' + (r.motivo || ''))} (período ${r.periodo ? r.periodo.de + '..' + r.periodo.ate : '?'})`);
       } catch (e) { console.error(`[fbs-cron] ${key} falhou:`, e.message); }
       await new Promise(r => setTimeout(r, 3000)); // respiro entre lojas
     }

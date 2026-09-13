@@ -26,14 +26,28 @@ const LOJAS = {
   },
 };
 
+/* 13/09 — SHOPEE FULL É POR EMPRESA. Hoje só a AMB tem; GOOD e Girassol respondiam FAILED
+   na geração do documento, o que PARECIA erro e era só ausência de Full. Com CNPJ novo a
+   caminho, isso viraria alarme recorrente pra quem embarcar a empresa. A resposta é
+   declarada — `<PREFIXO>_FBS=1|0` — e o padrão é `auto`: sem declarar, o serviço tenta uma
+   vez, e se a Shopee disser que não há documento, ele mesmo anota e para de insistir. */
+function fbsDaLoja(base) {
+  const v = String(process.env[base.prefixo + '_FBS'] || '').trim().toLowerCase();
+  if (['1', 'sim', 'true'].includes(v)) return 'sim';
+  if (['0', 'nao', 'não', 'false'].includes(v)) return 'nao';
+  return 'auto';
+}
+
 // Monta a config completa de uma loja, lendo as env vars pelo prefixo.
 function getConfigLoja(key) {
   const base = LOJAS[key];
   if (!base) throw new Error(`Loja desconhecida: ${key}`);
+  const fbs = fbsDaLoja(base);
   const p = base.prefixo;
 
   return {
     key: base.key,
+    fbs,          /* 'sim' | 'nao' | 'auto' — se esta empresa usa Shopee Full */
     nome: base.nome,
     prefixo: p,
     shopeeBase: SHOPEE_BASE,

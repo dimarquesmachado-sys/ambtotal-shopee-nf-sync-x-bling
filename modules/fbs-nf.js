@@ -297,7 +297,31 @@ function gravarImportadas(lojaKey, reg) {
 // ── ROTINA COMPLETA: busca na Shopee → devolve o que há de novo ──
 // Não importa no Bling (isso é a extensão). Grava o ZIP em disco e devolve
 // contagem. A extensão baixa o ZIP de "novas" e sobe no Bling.
+/* memória de 'esta loja não tem Full': gravada quando a Shopee recusa gerar o documento
+   com a loja em modo auto. Some se o dono declarar <PREFIXO>_FBS=1. */
+function arqSemFull(lojaKey) { return path.join(NF_DIR, '_sem-full-' + lojaKey + '.json'); }
+function marcarSemFull(lojaKey, motivo) {
+  try { ensureDir(NF_DIR); fs.writeFileSync(arqSemFull(lojaKey), JSON.stringify({ em: new Date().toISOString(), motivo })); } catch (e) {}
+}
+function lerSemFull(lojaKey) {
+  try { return JSON.parse(fs.readFileSync(arqSemFull(lojaKey), 'utf8')); } catch (e) { return null; }
+}
+function limparSemFull(lojaKey) { try { fs.unlinkSync(arqSemFull(lojaKey)); } catch (e) {} }
+
 async function rotina(loja, opts = {}) {
+  /* 13/09 — EMPRESA SEM SHOPEE FULL NÃO É ERRO. Só a AMB tem Full hoje; GOOD e Girassol
+     devolviam FAILED na geração do documento, o que parecia falha e era ausência. Com a
+     empresa declarando (<PREFIXO>_FBS=0) ou com o serviço aprendendo sozinho no modo auto,
+     a rotina sai limpa em vez de gritar — e a próxima empresa entra sem herdar alarme. */
+  const decl = String(loja.fbs || 'auto');
+  if (decl === 'nao') {
+    return { ok: true, sem_full: true, motivo: 'esta empresa não usa Shopee Full (declarado em ' + (loja.prefixo || '') + '_FBS=0)' };
+  }
+  if (decl === 'auto' && !opts.forcar) {
+    const sf = lerSemFull(loja.key);
+    if (sf) return { ok: true, sem_full: true, aprendido_em: sf.em, motivo: 'a Shopee não gera documento de Full pra esta loja (' + sf.motivo + ') — use &forcar=1 pra tentar de novo, ou declare ' + (loja.prefixo || '') + '_FBS=1' };
+  }
+  if (decl === 'sim') limparSemFull(loja.key);
   ensureDir(NF_DIR);
   try { limpar(loja.key); } catch (e) {}   // remove ZIPs antigos com timestamp
   const end = ymdSP();
@@ -320,7 +344,20 @@ async function rotina(loja, opts = {}) {
   const st = await fbsAguardar(loja, requestIds);
   // etapa 3: baixa os prontos
   const bufs = await fbsBaixar(loja, st.prontos);
-  if (!bufs.length) return { ok: false, motivo: 'nada baixado', status: st, periodo: { de: ymdRotulo(start), ate: ymdRotulo(end) } };
+  if (!bufs.length) {
+    /* a Shopee recusar TODOS os pedidos de documento, sem nenhum pronto, é a assinatura de
+       loja sem Full — no modo auto isso vira memória e a rotina para de insistir (e de
+       gastar chamada). Declarada como 'sim', segue reportando erro de verdade. */
+    const todosFalharam = (st.erros || []).length > 0 && !(st.prontos || []).length && !(st.aindaProcessando || []).length;
+    if (todosFalharam && String(loja.fbs || 'auto') !== 'sim') {
+      const motivo = (st.erros[0] && st.erros[0].msg) || 'FAILED';
+      marcarSemFull(loja.key, motivo);
+      return { ok: true, sem_full: true, aprendido_agora: true, status: st,
+               motivo: 'a Shopee não gerou documento de Full pra esta loja (' + motivo + ') — anotado; declare ' + (loja.prefixo || '') + '_FBS=1 se ela passar a usar Full',
+               periodo: { de: ymdRotulo(start), ate: ymdRotulo(end) } };
+    }
+    return { ok: false, motivo: 'nada baixado', status: st, periodo: { de: ymdRotulo(start), ate: ymdRotulo(end) } };
+  }
 
   // separa e deduplica contra o histórico
   const sep = separarXmls(bufs);
@@ -443,7 +480,7 @@ function estadoAtual(loja) {
 }
 
 module.exports = {
-  lerDePara, acharPorPedido, nfPedidoLoja, reconstruirDePara,
+  lerDePara, acharPorPedido, nfPedidoLoja, reconstruirDePara, lerSemFull, limparSemFull,
   NF_DIR, rotina, estadoAtual, marcarImportadas, chavesDoZip, caminhoZip, limpar,
   lerImportadas, nfEmitente, nfChave, ymdSP,
   // expostos p/ teste
