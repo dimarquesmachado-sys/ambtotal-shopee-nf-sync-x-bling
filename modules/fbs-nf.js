@@ -404,11 +404,47 @@ async function rotina(loja, opts = {}) {
   if (!requestIds.length) {
     /* sem tarefa gerada: pode ser loja sem Full ou período sem nota — em ambos não há o que
        fazer, e nenhum deles é falha nossa. Sai calmo, com a mensagem da Shopee junto. */
-    return { ok: true, sem_documento: true,
-             motivo: errosGerar.length
-               ? ('a Shopee não gerou documento de Full (' + errosGerar[0].slice(0, 200) + ') — se esta empresa não usa Full, declare ' + (loja.prefixo || '') + '_FBS=0 pra sair do ciclo')
-               : 'nenhuma nota de Full no período',
-             periodo: { de: ymdRotulo(start), ate: ymdRotulo(end) } };
+    // ⚠️ b-erro-cnpj - ERRO DA API NAO E "NAO TEM FULL".
+    //
+    // [stated 16/09] o dono ligou `FBS_ENVIAR_CNPJ=1` e a Shopee recusou com
+    // `ERROR_SP_SERVICE_UNEXPECTED_V2` — ela ainda NAO aceita o campo antes
+    // de 30/10. Mas a mensagem daqui disse:
+    //
+    //   "a Shopee não gerou documento de Full — se esta empresa não usa
+    //    Full, declare AMB_SYNC_FBS=0 pra sair do ciclo"
+    //
+    // ⚠️ SEGUIR ESSE CONSELHO DESLIGARIA O FULL DA AMB POR ENGANO. A empresa
+    // usa Full, tem 330 notas importadas — o problema era o campo novo.
+    //
+    // 📌 Sem tarefa gerada tem DUAS causas, e a conduta e OPOSTA:
+    //   nenhum erro    -> periodo sem nota, ou empresa sem Full   (calmo)
+    //   erro da API    -> ALGO QUEBROU e precisa de acao          (alto)
+    const houveErro = errosGerar.length > 0;
+    const cnpjLigado = String(process.env.FBS_ENVIAR_CNPJ || '') === '1';
+    return {
+      ok: true,
+      // ⚠️ MANTENHO `sem_documento: true` — NAO mudo a semantica do campo.
+      //
+      // Minha 1a versao punha `!houveErro` aqui. Mas a EXTENSAO do navegador
+      // consome este campo (server.js repassa em /fbs/ext/estado), e eu nao
+      // tenho o codigo dela neste repo pra conferir o que ela faz quando ele
+      // vira false.
+      //
+      // 📌 Mudar contrato que outro lado consome, sem poder ler esse outro
+      // lado, e como eu quebrei a fila de impressao hoje. O valor que o dono
+      // precisa esta na MENSAGEM — e essa eu posso corrigir sem risco.
+      sem_documento: true,
+      erro_api: houveErro ? errosGerar[0].slice(0, 220) : null,
+      motivo: !houveErro
+        ? 'nenhuma nota de Full no periodo (ou esta empresa nao usa Full — '
+          + 'se for o caso, declare ' + loja.prefixo + '_FBS=0 pra sair do ciclo)'
+        : ('⚠️ a Shopee RECUSOU o pedido: ' + errosGerar[0].slice(0, 200)
+          + (cnpjLigado
+            ? ' — FBS_ENVIAR_CNPJ esta LIGADO. A Shopee so aceita o campo CNPJ '
+              + 'a partir de 30/10/2026; DESLIGUE a env e a busca volta.'
+            : ' — ISTO NAO E "empresa sem Full": e erro da API. NAO declare '
+              + loja.prefixo + '_FBS=0 por causa disto.')),
+      periodo: { de: ymdRotulo(start), ate: ymdRotulo(end) } };
   }
 
   // etapa 2: espera ficar pronto
