@@ -76,6 +76,45 @@ function ymdRotulo(n) { const s = String(n); return `${s.slice(0, 4)}-${s.slice(
    por loja pra deduplicar. O dado estava em casa.
    A env continua existindo e GANHA do descoberto — se um dia a Shopee exigir um CNPJ de
    filial diferente, é só defini-la, sem mexer em código. */
+// ⚠️ O LEMBRETE DE 30/10 MORA NO CODIGO, NAO NA MEMORIA DE NINGUEM.
+//
+// [stated 16/09] "eu nao vou lembrar. vc consegue lembrar?" — nao de forma
+// confiavel: eu leio minhas anotacoes quando ele fala comigo, mas nada me
+// cutuca numa data.
+//
+// 📌 O que funciona e o que ele mesmo descobriu hoje: principio depende de
+// alguem lembrar; CODIGO AVISA SOZINHO. A data fica aqui, e o aviso aparece
+// justamente quando ele abre o painel pra trabalhar.
+//
+// O QUE ACONTECE, POR FASE:
+//   ate 24/10   silencio (nada a fazer, a Shopee recusa o campo hoje)
+//   25→29/10    AVISO: ligue a env, a virada esta chegando
+//   30/10 em diante, SEM a env:  ALERTA — a busca vai falhar
+//
+// ⚠️ A janela de 5 dias existe pra ele ligar e CONFERIR com calma, em vez de
+// descobrir no dia com o galpao operando.
+const CNPJ_OBRIGATORIO_EM = Date.UTC(2026, 9, 30);   // 30/10/2026 (mes 9 = outubro)
+
+function avisoPrazoCnpj(loja) {
+  const ligado = String(process.env.FBS_ENVIAR_CNPJ || '') === '1';
+  if (ligado) return null;   // ja resolvido, nao enche
+
+  const agora = Date.now();
+  const diasPra = Math.ceil((CNPJ_OBRIGATORIO_EM - agora) / 864e5);
+
+  if (diasPra > 5) return null;   // ainda cedo
+
+  const env = 'FBS_ENVIAR_CNPJ=1';
+  if (diasPra > 0) {
+    return `⚠️ FALTAM ${diasPra} DIA(S) pra a Shopee exigir o CNPJ no Full `
+      + `(30/10/2026). Ligue ${env} no Render e rode uma busca pra conferir — `
+      + `depois da data, sem isso a importacao de XML PARA.`;
+  }
+  return `🚨 A SHOPEE JA EXIGE O CNPJ (desde 30/10/2026) e ${env} NAO esta `
+    + `ligado. A busca de XML do Shopee Full vai FALHAR ate ligar. `
+    + `Render > Shopee-Sync-Organizar-Envio-Coleta > Environment.`;
+}
+
 function cnpjDaChave(chave) {
   const c = String(chave || '').replace(/\D/g, '');
   return c.length === 44 ? c.slice(6, 20) : null;
@@ -354,6 +393,7 @@ function lerImportadas(lojaKey) {
   } catch (e) { return { quando: null, saida: [], entrada: [] }; }
 }
 function gravarImportadas(lojaKey, reg) {
+  
   ensureDir(NF_DIR);
   if (reg.saida.length > 5000) reg.saida = reg.saida.slice(-5000);
   if (reg.entrada.length > 5000) reg.entrada = reg.entrada.slice(-5000);
@@ -378,8 +418,16 @@ async function rotina(loja, opts = {}) {
      a rotina sai limpa em vez de gritar — e a próxima empresa entra sem herdar alarme. */
   const decl = String(loja.fbs || 'auto');
   if (decl === 'nao') {
-    return { ok: true, sem_full: true, motivo: 'esta empresa não usa Shopee Full (declarado em ' + (loja.prefixo || '') + '_FBS=0)' };
+    return { ok: true, aviso_prazo: avisoPrazo, sem_full: true, motivo: 'esta empresa não usa Shopee Full (declarado em ' + (loja.prefixo || '') + '_FBS=0)' };
   }
+// ⚠️ o lembrete de 30/10 aparece AQUI — na rotina que roda no cron e no
+  // painel. E o unico lugar que o dono olha de verdade.
+  //
+  // 📌 Vai no LOG e no CAMPO da resposta: o log pega o cron (que roda
+  // sozinho 4x por dia), o campo pega o painel (que ele abre pra trabalhar).
+  const avisoPrazo = avisoPrazoCnpj(loja);
+  if (avisoPrazo) console.warn(`[${loja.key} FBS] ${avisoPrazo}`);
+
   ensureDir(NF_DIR);
   try { limpar(loja.key); } catch (e) {}   // remove ZIPs antigos com timestamp
   const end = ymdSP();
@@ -423,6 +471,7 @@ async function rotina(loja, opts = {}) {
     const cnpjLigado = String(process.env.FBS_ENVIAR_CNPJ || '') === '1';
     return {
       ok: true,
+      aviso_prazo: avisoPrazo,
       // ⚠️ MANTENHO `sem_documento: true` — NAO mudo a semantica do campo.
       //
       // Minha 1a versao punha `!houveErro` aqui. Mas a EXTENSAO do navegador
@@ -453,7 +502,7 @@ async function rotina(loja, opts = {}) {
   const bufs = await fbsBaixar(loja, st.prontos);
   if (!bufs.length) {
     const msgs = (st.erros || []).map(e => e && e.msg).filter(Boolean);
-    return { ok: true, sem_documento: true, status: st,
+    return { ok: true, aviso_prazo: avisoPrazo, sem_documento: true, status: st,
              motivo: msgs.length
                ? ('a Shopee recusou os documentos (' + String(msgs[0]).slice(0, 200) + ') — se esta empresa não usa Full, declare ' + (loja.prefixo || '') + '_FBS=0 pra sair do ciclo')
                : 'nada baixado no período',
@@ -550,7 +599,7 @@ function estadoAtual(loja) {
   const meus = nomes.filter(n => n.startsWith(loja.key + '-') && /\.zip$/.test(n))
     .map(n => ({ n, t: (() => { try { return fs.statSync(path.join(NF_DIR, n)).mtimeMs; } catch (e) { return 0; } })() }))
     .sort((a, b) => b.t - a.t);
-  if (!meus.length) return { ok: true, precisa: false, motivo: 'nenhum arquivo baixado ainda', novas_saida: 0, novas_entrada: 0 };
+  if (!meus.length) return { ok: true, aviso_prazo: avisoPrazo, precisa: false, motivo: 'nenhum arquivo baixado ainda', novas_saida: 0, novas_entrada: 0 };
 
   const imp = lerImportadas(loja.key);
   const jaSaida = new Set(imp.saida), jaEntrada = new Set(imp.entrada);
