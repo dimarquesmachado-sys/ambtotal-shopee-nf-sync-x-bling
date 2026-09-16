@@ -259,6 +259,13 @@ async function listar(){
     /* b-av5: o lembrete de 30/10 aparece AQUI — e o unico lugar que o dono
        ve ao abrir o painel sem clicar em "Buscar notas". Faixa no topo, que
        nao da pra nao ver. */
+    /* b-av6 (Codex): se o aviso SUMIU (o dono resolveu), a faixa tem que
+       sumir junto — senao ele resolve, recarrega, ve a faixa velha e acha
+       que nao adiantou. */
+    if (!j.aviso_prazo) {
+      var velho = document.getElementById('avisoPrazo');
+      if (velho && velho.parentNode) velho.parentNode.removeChild(velho);
+    }
     if (j.aviso_prazo) {
       var av = document.getElementById('avisoPrazo');
       if (!av) {

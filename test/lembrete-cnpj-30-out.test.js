@@ -193,6 +193,35 @@ const src = fs.readFileSync(
      '  ⚠️ e `avisoPrazoCnpj` esta EXPORTADA (senao o painel quebra)');
 }
 
+// ── ⚠️ e o aviso NÃO manda ligar antes da data ──────────────────────
+//
+// Contradição minha: a Shopee **só aceita** o campo a partir de 30/10 —
+// provado em produção (o dono ligou a env e levou
+// `ERROR_SP_SERVICE_UNEXPECTED_V2`, com a importação parada até apagar).
+//
+// ⚠️ E eu mandava ligar nos 5 dias ANTES. Seguir o meu próprio aviso
+// quebraria a importação hoje, para prevenir algo que só acontece depois.
+{
+  ok(/NAO ligue \$\{env\} ainda/.test(src),
+     '⚠️ nos 5 dias antes, o aviso diz pra NAO ligar ainda');
+  ok(/antes da data a Shopee `\n\s*\+ `RECUSA o campo/.test(src) || /RECUSA o campo/.test(src),
+     '  explicando que a Shopee recusa antes da data');
+  ok(/No dia 30, ligue e rode uma `\n?\s*\+?\s*`?busca/.test(src) || /No dia 30, ligue/.test(src),
+     '  e dizendo o que fazer NO dia');
+}
+
+// ── e a faixa SOME quando o aviso passa ─────────────────────────────
+//
+// ⚠️ Se ela ficar, o dono resolve, recarrega, vê a faixa velha e acha que
+// não adiantou — e pode mexer de novo em algo que já estava certo.
+{
+  const srv = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  ok(/if \(!j\.aviso_prazo\) \{/.test(srv),
+     '⚠️ o painel REMOVE a faixa quando o aviso some');
+  ok(/velho\.parentNode\.removeChild\(velho\)/.test(srv),
+     '  tirando o elemento do DOM');
+}
+
 console.log('');
 console.log(falhas === 0 ? '=== TODOS OS CASOS PASSARAM' : '=== ' + falhas + ' FALHA(S)');
 process.exit(falhas ? 1 : 0);

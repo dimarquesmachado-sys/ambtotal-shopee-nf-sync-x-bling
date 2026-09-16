@@ -150,9 +150,22 @@ function avisoPrazoCnpj(loja) {
         + `FBS_CNPJ_${String(loja.key || '').toUpperCase()}. Defina essa env, `
         + `ou importe uma nota antes da data.`;
     }
+    // ⚠️ b-av6 (Codex) - NAO MANDAR LIGAR ANTES DA DATA. CONTRADICAO MINHA.
+    //
+    // A Shopee SO ACEITA o campo a partir de 30/10 — provado em producao
+    // hoje: o dono ligou a env e levou ERROR_SP_SERVICE_UNEXPECTED_V2, com a
+    // importacao parada ate apagar.
+    //
+    // ⚠️ E EU MANDAVA LIGAR NOS 5 DIAS ANTES. Seguir o meu proprio aviso
+    // QUEBRARIA a importacao hoje, pra prevenir algo que so acontece depois.
+    // E o MESMO erro do PR #22, que o dono ja pagou na pele.
+    //
+    // 📌 O aviso agora PREPARA em vez de mandar agir: diz a data, diz pra
+    // deixar pronto, e diz explicitamente pra NAO ligar antes.
     return `⚠️ FALTAM ${diasPra} DIA(S) pra a Shopee exigir o CNPJ no Full `
-      + `(30/10/2026). Ligue ${env} no Render e rode uma busca pra conferir — `
-      + `depois da data, sem isso a importacao de XML PARA.`;
+      + `(30/10/2026). NAO ligue ${env} ainda — antes da data a Shopee `
+      + `RECUSA o campo e a importacao para. No dia 30, ligue e rode uma `
+      + `busca pra conferir.`;
   }
   // ⚠️ b-av3 (Codex, P2): depois do prazo ha DOIS motivos, e a acao e
   // diferente. Minha mensagem so falava do primeiro — e mandaria ligar uma
