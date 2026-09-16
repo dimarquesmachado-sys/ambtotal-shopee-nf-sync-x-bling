@@ -70,10 +70,35 @@ function ymdRotulo(n) { const s = String(n); return `${s.slice(0, 4)}-${s.slice(
    O que NÃO nos afeta, conferido: o `file_name` novo ({CNPJ}FULLInvoiceXML{n}.zip), porque
    nós mesmos nomeamos os zips que salvamos; e os document_type novos, porque só pedimos os
    que já usamos. */
+/* 16/09 — o dono confirmou que NÃO há CNPJ separado de filial: é o mesmo da empresa. Então
+   dá pra descobrir sozinho, sem ele digitar nada: a CHAVE DE ACESSO de toda NF-e que já
+   importamos carrega o CNPJ do emitente nas posições 7 a 20, e nós já guardamos essas chaves
+   por loja pra deduplicar. O dado estava em casa.
+   A env continua existindo e GANHA do descoberto — se um dia a Shopee exigir um CNPJ de
+   filial diferente, é só defini-la, sem mexer em código. */
+function cnpjDaChave(chave) {
+  const c = String(chave || '').replace(/\D/g, '');
+  return c.length === 44 ? c.slice(6, 20) : null;
+}
+
 function cnpjDaLoja(loja) {
   const env = 'FBS_CNPJ_' + String(loja.key || '').toUpperCase();
   const v = String(process.env[env] || '').replace(/\D/g, '');
-  return v.length === 14 ? v : null;
+  if (v.length === 14) return v;
+
+  /* descoberto: o CNPJ mais frequente entre as notas de SAÍDA já importadas. Frequência e não
+     "a primeira" porque uma nota de outro emitente no meio do pacote (já aconteceu com pedido
+     que o token alcança e não é da empresa) não pode decidir sozinha. */
+  try {
+    const reg = lerImportadas(loja.key);
+    const cont = new Map();
+    for (const ch of (reg.saida || [])) {
+      const c = cnpjDaChave(ch);
+      if (c) cont.set(c, (cont.get(c) || 0) + 1);
+    }
+    if (!cont.size) return null;
+    return [...cont.entries()].sort((a2, b2) => b2[1] - a2[1])[0][0];
+  } catch (e) { return null; }
 }
 
 async function fbsGerar(loja, start, end, documentType, fileType = 1, documentStatus = 1) {
@@ -83,8 +108,9 @@ async function fbsGerar(loja, start, end, documentType, fileType = 1, documentSt
     if (!cnpj) {
       /* falha ALTO em vez de mandar sem o campo: a partir de 30/10 a requisição sem CNPJ é
          recusada, e um erro claro aqui é melhor que um FAILED genérico da Shopee. */
-      throw new Error('FBS_ENVIAR_CNPJ está ligado mas falta FBS_CNPJ_' +
-        String(loja.key || '').toUpperCase() + ' (14 dígitos, da filial registrada na Shopee)');
+      throw new Error('FBS_ENVIAR_CNPJ está ligado mas não consegui o CNPJ de "' + loja.key +
+        '": nenhuma NF-e importada ainda pra descobrir pela chave de acesso. Rode uma importação ' +
+        'antes, ou defina FBS_CNPJ_' + String(loja.key || '').toUpperCase() + ' (14 dígitos).');
     }
     bd.cnpj = cnpj;
   }
@@ -509,7 +535,7 @@ function estadoAtual(loja) {
 }
 
 module.exports = {
-  cnpjDaLoja,
+  cnpjDaLoja, cnpjDaChave,
   lerDePara, acharPorPedido, nfPedidoLoja, reconstruirDePara,
   NF_DIR, rotina, estadoAtual, marcarImportadas, chavesDoZip, caminhoZip, limpar,
   lerImportadas, nfEmitente, nfChave, ymdSP,
