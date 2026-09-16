@@ -124,7 +124,16 @@ app.get('/:loja/fbs/pendentes', resolverLoja, (req, res) => {
     return { arquivo: n, tipo, bytes: st ? st.size : 0, em: st ? st.mtime.toISOString() : null, chaves: fbsNf.chavesDoZip(n).length };
   }).sort((a, b) => (b.em || '').localeCompare(a.em || ''));
   const imp = fbsNf.lerImportadas(req.loja.key);
-  res.json({ ok: true, loja: req.loja.key, arquivos: meus, importadas: { saida: imp.saida.length, entrada: imp.entrada.length, quando: imp.quando } });
+  // ⚠️ b-av5 (Codex): O PAINEL NAO PASSA PELA ROTINA.
+  //
+  // Abrir /fbs/painel chama `listar()`, que bate em /fbs/pendentes — e
+  // essa rota nao calculava nem devolvia o aviso. Quem abre o painel e
+  // baixa um ZIP ja pronto, SEM clicar em "Buscar notas", nunca via o
+  // lembrete de 30/10.
+  //
+  // 📌 E esse e o uso mais comum: o cron ja deixou o ZIP pronto, o dono
+  // so abre e baixa. O aviso tem que estar AQUI.
+  res.json({ ok: true, loja: req.loja.key, aviso_prazo: fbsNf.avisoPrazoCnpj(req.loja), arquivos: meus, importadas: { saida: imp.saida.length, entrada: imp.entrada.length, quando: imp.quando } });
 });
 
 // Baixa o conteúdo de um ZIP salvo (a extensão pega este binário e sobe no Bling).
@@ -247,6 +256,21 @@ async function rodar(){
 }
 async function listar(){
   try{ const r=await fetch('/'+LOJA+'/fbs/pendentes?k='+K); const j=await r.json();
+    /* b-av5: o lembrete de 30/10 aparece AQUI — e o unico lugar que o dono
+       ve ao abrir o painel sem clicar em "Buscar notas". Faixa no topo, que
+       nao da pra nao ver. */
+    if (j.aviso_prazo) {
+      var av = document.getElementById('avisoPrazo');
+      if (!av) {
+        av = document.createElement('div');
+        av.id = 'avisoPrazo';
+        av.style.cssText = 'background:#fff3cd;border:2px solid #e0a800;color:#7a5c00;'
+          + 'padding:12px 14px;border-radius:9px;margin:12px 0;font-weight:700;line-height:1.45;';
+        var alvo = document.getElementById('lista');
+        if (alvo && alvo.parentNode) alvo.parentNode.insertBefore(av, alvo);
+      }
+      av.textContent = j.aviso_prazo;
+    }
     const arqs=j.arquivos||[]; const div=document.getElementById('lista');
     if(!arqs.length){ div.innerHTML='<p class="t">Nada pronto ainda. Clique em Buscar.</p>'; return; }
     div.innerHTML='<h3>Prontos pra importar</h3>'+arqs.map(a=>

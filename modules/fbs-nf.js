@@ -706,6 +706,10 @@ function estadoAtual(loja) {
 }
 
 module.exports = {
+  // ⚠️ b-av5: a rota /fbs/pendentes precisa calcular o aviso por conta
+  // propria (ela nao passa pela `rotina`). Sem exportar, ela chamaria uma
+  // funcao inexistente — e o painel quebraria em vez de avisar.
+  avisoPrazoCnpj,
   cnpjDaLoja, cnpjDaChave,
   lerDePara, acharPorPedido, nfPedidoLoja, reconstruirDePara,
   NF_DIR, rotina, estadoAtual, marcarImportadas, chavesDoZip, caminhoZip, limpar,

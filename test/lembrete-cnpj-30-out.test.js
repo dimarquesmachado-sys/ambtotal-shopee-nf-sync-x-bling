@@ -172,6 +172,27 @@ const src = fs.readFileSync(
      '  e env desligada: aponta a env');
 }
 
+// ── ⚠️ e o PAINEL mostra, sem precisar clicar em "Buscar notas" ─────
+//
+// Abrir `/fbs/painel` chama `listar()`, que bate em `/fbs/pendentes` — e
+// essa rota não passa pela `rotina()`. Quem abre o painel e baixa um ZIP já
+// pronto (o uso MAIS comum: o cron deixou pronto, o dono só baixa) nunca
+// veria o lembrete.
+{
+  const srv = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  ok(/aviso_prazo: fbsNf\.avisoPrazoCnpj\(req\.loja\)/.test(srv),
+     '⚠️ /fbs/pendentes CALCULA o aviso (nao passa pela rotina)');
+  ok(/if \(j\.aviso_prazo\)/.test(srv),
+     '  e o painel PINTA (rota que devolve sem tela que mostra nao serve)');
+
+  // ⚠️ e a função está exportada — senão a rota chamaria algo inexistente
+  const mod = fs.readFileSync(
+    path.join(__dirname, '..', 'modules', 'fbs-nf.js'), 'utf8');
+  const iExp = mod.lastIndexOf('module.exports = {');
+  ok(/avisoPrazoCnpj,/.test(mod.slice(iExp)),
+     '  ⚠️ e `avisoPrazoCnpj` esta EXPORTADA (senao o painel quebra)');
+}
+
 console.log('');
 console.log(falhas === 0 ? '=== TODOS OS CASOS PASSARAM' : '=== ' + falhas + ' FALHA(S)');
 process.exit(falhas ? 1 : 0);
