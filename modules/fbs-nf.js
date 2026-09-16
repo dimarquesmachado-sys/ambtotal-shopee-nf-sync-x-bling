@@ -125,7 +125,25 @@ function avisoPrazoCnpj(loja) {
   // impressao de resolvido, e o unico sinal restante seria a busca falhando
   // sem ninguem entender por que.
   const ligado = String(process.env.FBS_ENVIAR_CNPJ || '') === '1';
-  if (ligado && cnpjDaLoja(loja)) return null;   // ligado E com CNPJ = resolvido
+  const temCnpj = !!cnpjDaLoja(loja);
+  // ⚠️ a funcao ja declara `agora` mais abaixo — reuso em vez de duplicar
+  const jaVale = Date.now() >= CNPJ_OBRIGATORIO_EM;
+
+  // ⚠️ b-av7 (Codex, P1) - "LIGADO E COM CNPJ" SO E BOM DEPOIS DA DATA.
+  //
+  // Eu calava o aviso sempre que a env estivesse ligada com CNPJ. Mas ANTES
+  // de 30/10 esse e o PIOR estado possivel: o `fbsGerar` manda o campo, a
+  // Shopee RECUSA (provado em producao hoje) e a importacao esta PARADA
+  // agora — e era justamente aí que eu ficava calado.
+  //
+  // 📌 Quem mais precisa do aviso era quem menos recebia.
+  if (!jaVale && ligado) {
+    return `🚨 ${'FBS_ENVIAR_CNPJ'}=1 esta LIGADO, mas a Shopee so aceita o `
+      + `CNPJ a partir de 30/10/2026 — ate la ela RECUSA o campo e a `
+      + `importacao de XML do Full esta PARADA. DESLIGUE a env no Render e `
+      + `ligue de novo no dia 30.`;
+  }
+  if (jaVale && ligado && temCnpj) return null;   // so DEPOIS da data e resolvido
 
   const agora = Date.now();
   const diasPra = Math.ceil((CNPJ_OBRIGATORIO_EM - agora) / 864e5);

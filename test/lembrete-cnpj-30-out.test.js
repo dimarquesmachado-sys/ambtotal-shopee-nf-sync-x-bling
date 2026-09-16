@@ -96,8 +96,11 @@ const src = fs.readFileSync(
   // Se a env esta ligada mas a loja nao tem CNPJ (empresa nova no Full, sem
   // nota importada e sem override), o pedido vai SEM o campo e a Shopee
   // recusa. Eu calava o aviso justamente nesse caso.
-  ok(/if \(ligado && cnpjDaLoja\(loja\)\) return null;/.test(src),
-     '⚠️ so cala quando LIGADO **E** com CNPJ disponivel');
+  // ⚠️ b-av7: a condicao ganhou a DATA. Antes era `ligado && cnpjDaLoja(...)`
+  // — e isso calava justamente no estado mais perigoso (env ligada ANTES de
+  // 30/10, com a Shopee recusando e a importacao parada).
+  ok(/if \(jaVale && ligado && temCnpj\) return null;/.test(src),
+     '⚠️ so cala DEPOIS da data, com env ligada E com CNPJ');
   ok(!/if \(ligado\) return null;/.test(src),
      '  (a versao que calava so pela env saiu)');
 }
@@ -220,6 +223,47 @@ const src = fs.readFileSync(
      '⚠️ o painel REMOVE a faixa quando o aviso some');
   ok(/velho\.parentNode\.removeChild\(velho\)/.test(srv),
      '  tirando o elemento do DOM');
+}
+
+// ── ⚠️ "ligado + com CNPJ" só é bom DEPOIS da data ──────────────────
+//
+// Eu calava o aviso sempre que a env estivesse ligada com CNPJ. Mas ANTES de
+// 30/10 esse é o PIOR estado: o `fbsGerar` manda o campo, a Shopee RECUSA
+// (provado em produção hoje) e a importação está PARADA — e era justamente
+// aí que eu ficava calado.
+//
+// 📌 Quem mais precisa do aviso era quem menos recebia. É o estado que o
+// dono viveu hoje.
+{
+  ok(/if \(!jaVale && ligado\) \{/.test(src),
+     '⚠️ antes da data, env LIGADA gera alerta (nao silencio)');
+  ok(/DESLIGUE a env no Render/.test(src),
+     '  mandando DESLIGAR, que e a acao certa agora');
+  ok(/if \(jaVale && ligado && temCnpj\) return null;/.test(src),
+     '  ⚠️ e so cala DEPOIS da data (era `ligado && temCnpj`, sem data)');
+
+  // a matriz inteira
+  const EM = Date.UTC(2026, 9, 30, 3, 0, 0);
+  const decidir = (iso, ligado) => {
+    const t = Date.parse(iso);
+    const jaVale = t >= EM;
+    if (!jaVale && ligado) return 'desligue';
+    if (jaVale && ligado) return null;
+    const d = Math.ceil((EM - t) / 864e5);
+    if (d > 5) return null;
+    return d > 0 ? 'nao ligue ainda' : 'ligue agora';
+  };
+
+  ok(decidir('2026-09-16T12:00:00Z', true) === 'desligue',
+     '  hoje com env ligada: DESLIGUE (o caso real de 16/09)');
+  ok(decidir('2026-09-16T12:00:00Z', false) === null,
+     '  hoje sem env: silencio');
+  ok(decidir('2026-10-27T12:00:00Z', false) === 'nao ligue ainda',
+     '  27/10 sem env: prepara, sem mandar ligar');
+  ok(decidir('2026-10-31T12:00:00Z', false) === 'ligue agora',
+     '  31/10 sem env: ligue');
+  ok(decidir('2026-10-31T12:00:00Z', true) === null,
+     '  31/10 com env: silencio (resolvido)');
 }
 
 console.log('');
