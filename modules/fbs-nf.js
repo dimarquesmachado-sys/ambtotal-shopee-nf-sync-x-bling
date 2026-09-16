@@ -58,7 +58,33 @@ function ymdRotulo(n) { const s = String(n); return `${s.slice(0, 4)}-${s.slice(
 
 // ── ETAPA 1: gera as tarefas de um tipo de documento, devolve os request_id ──
 async function fbsGerar(loja, start, end, documentType, fileType = 1, documentStatus = 1) {
+  // ⚠️ CNPJ OBRIGATORIO A PARTIR DE 30/10/2026.
+  //
+  // [stated 16/09] e-mail da Shopee Open Platform: a
+  // `generate_fbs_invoices` passa a EXIGIR o parametro CNPJ, de uma filial
+  // registrada, UM por request.
+  //
+  // ⚠️ SEM ELE, A PARTIR DAQUELA DATA O PEDIDO FALHA e os XMLs do Shopee
+  // Full param de entrar no Bling — sem erro visivel pro galpao, so as
+  // notas sumindo.
+  //
+  // 📌 Mando JA (antes do prazo): a Shopee aceita parametro extra hoje, e
+  // assim a virada nao depende de ninguem lembrar em 30/10.
+  //
+  // 📌 O dono confirmou (16/09): NAO ha filial — mesmo no Full e o CNPJ da
+  // matriz. Se um dia houver, cada filial vira um request proprio.
+  const cnpj = (loja && loja.fbsCnpj) || null;
   const body = { batch_download: { start, end, document_type: documentType, file_type: fileType, document_status: documentStatus } };
+  if (cnpj) {
+    body.batch_download.cnpj = cnpj;
+  } else {
+    // ⚠️ nao derrubo hoje (ainda funciona sem), mas deixo BARULHENTO: depois
+    // de 30/10 este aviso e a diferenca entre "sei por que parou" e "as
+    // notas sumiram e ninguem sabe".
+    console.warn(`[fbs-nf] ⚠️ ${loja && loja.key}: SEM CNPJ configurado `
+      + `(${loja && loja.prefixo}_FBS_CNPJ). A Shopee EXIGE a partir de `
+      + `30/10/2026 — depois dessa data a busca de XML vai FALHAR.`);
+  }
   const { ok, data } = await shopee.shopeeApiCall(loja, '/api/v2/order/generate_fbs_invoices', 'POST', body, null);
   if (!ok || (data && data.error)) throw new Error(`generate_fbs_invoices erro: ${JSON.stringify(data && (data.error || data))}`);
   const lista = (data && data.result_list) || [];
