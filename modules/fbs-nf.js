@@ -108,9 +108,17 @@ async function fbsGerar(loja, start, end, documentType, fileType = 1, documentSt
     if (!cnpj) {
       /* falha ALTO em vez de mandar sem o campo: a partir de 30/10 a requisição sem CNPJ é
          recusada, e um erro claro aqui é melhor que um FAILED genérico da Shopee. */
-      throw new Error('FBS_ENVIAR_CNPJ está ligado mas não consegui o CNPJ de "' + loja.key +
-        '": nenhuma NF-e importada ainda pra descobrir pela chave de acesso. Rode uma importação ' +
-        'antes, ou defina FBS_CNPJ_' + String(loja.key || '').toUpperCase() + ' (14 dígitos).');
+      /* 16/09 — a mensagem precisa separar DOIS casos que chegam aqui iguais, senão o dono
+         investiga o lado errado:
+           · empresa que TEM Full e ainda não importou nada → é só rodar uma importação;
+           · empresa em modo `auto` que na verdade NÃO tem Full → nunca vai ter nota, e o
+             caminho é declarar <PREFIXO>_FBS=0, não caçar CNPJ.
+         Só a AMB tem Full hoje, então o segundo caso é o provável nas outras duas. */
+      throw new Error('FBS_ENVIAR_CNPJ está ligado mas não consegui o CNPJ de "' + loja.key + '". ' +
+        'Se esta empresa TEM Shopee Full, rode uma importação antes (o CNPJ sai da chave de acesso ' +
+        'da primeira nota) ou defina FBS_CNPJ_' + String(loja.key || '').toUpperCase() + ' com 14 dígitos. ' +
+        'Se ela NÃO tem Full, declare ' + (loja.prefixo || '<PREFIXO>') + '_FBS=0 — aí a rotina sai limpa ' +
+        'em vez de tentar.');
     }
     bd.cnpj = cnpj;
   }

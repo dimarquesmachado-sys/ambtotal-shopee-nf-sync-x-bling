@@ -28,4 +28,17 @@ assert.strictEqual(m.cnpjDaLoja({ key: 'teste' }), null,
   'sem env e sem nota importada, devolve null — e o chamador falha ALTO em vez de mandar requisição incompleta');
 if (antes !== undefined) process.env.FBS_CNPJ_TESTE = antes;
 
+/* 16/09 — a mensagem de erro precisa separar DOIS casos que chegam aqui iguais: empresa que
+   TEM Full e ainda não importou nada (é só rodar uma importação) e empresa que NÃO tem Full
+   (nunca vai ter nota — o caminho é declarar <PREFIXO>_FBS=0). Só a AMB tem Full hoje, então
+   o segundo é o provável nas outras duas, e mandar o dono caçar CNPJ ali seria mandá-lo
+   investigar o lado errado. */
+{
+  const fonte = require('fs').readFileSync(require('path').join(__dirname, '..', 'modules', 'fbs-nf.js'), 'utf8');
+  const msg = /throw new Error\('FBS_ENVIAR_CNPJ[\s\S]*?\);/.exec(fonte);
+  assert.ok(msg, 'não achei a mensagem de erro do CNPJ');
+  assert.ok(/TEM Shopee Full/.test(msg[0]), 'falta o caso de quem tem Full e não importou ainda');
+  assert.ok(/_FBS=0/.test(msg[0]), 'falta dizer o caminho de quem NÃO tem Full');
+}
+
 console.log('OK: CNPJ do FBS — descoberto pela chave de acesso das notas já importadas, com a env mandando quando existir');
