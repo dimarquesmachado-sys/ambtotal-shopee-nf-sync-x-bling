@@ -165,6 +165,10 @@ app.get('/:loja/fbs/ext/estado', resolverLoja, async (req, res) => {
     res.json({
       ok: true,
       empresa: req.loja.key,
+      // ⚠️ b-av3 (Codex, P2): esta rota REMONTA o JSON, entao campo novo do
+      // motor nao chega sozinho. O aviso de 30/10 morreria aqui — e a
+      // extensao e onde o dono trabalha, o lugar que mais importa.
+      aviso_prazo: st.aviso_prazo || null,
       arquivo: nomeSaida || nomeEntrada || null,
       precisa: st.precisa,
       novas_saida: st.novas_saida,
@@ -186,7 +190,8 @@ app.get('/:loja/fbs/ext/buscar', resolverLoja, async (req, res) => {
     const r = await fbsNf.rotina(req.loja, { forcar: String(req.query.forcar || '') === '1' });   /* Codex #18: a rota de busca da extensão também precisa do forçado */
     /* Codex #18: a extensão perdia sem_documento e o motivo quando a rotina saía calma —
        do outro lado aparecia só 'precisa: false', sem explicar por quê. */
-    res.json({ ok: true, empresa: req.loja.key, resultado: { precisa: r.novas ? (r.novas.saida + r.novas.entrada) > 0 : false, novas: r.novas, emitente: r.emitente, periodo: r.periodo, sem_documento: r.sem_documento || undefined, sem_full: r.sem_full || undefined, motivo: r.motivo } });
+    // ⚠️ b-av3: idem — o aviso de 30/10 tambem chega na extensao por aqui.
+    res.json({ ok: true, empresa: req.loja.key, aviso_prazo: r.aviso_prazo || null, resultado: { precisa: r.novas ? (r.novas.saida + r.novas.entrada) > 0 : false, novas: r.novas, emitente: r.emitente, periodo: r.periodo, sem_documento: r.sem_documento || undefined, sem_full: r.sem_full || undefined, motivo: r.motivo } });
   } catch (e) { res.status(500).json({ ok: false, erro: String(e.message || e) }); }
 });
 

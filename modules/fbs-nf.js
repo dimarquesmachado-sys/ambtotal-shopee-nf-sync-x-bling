@@ -105,6 +105,16 @@ function ymdRotulo(n) { const s = String(n); return `${s.slice(0, 4)}-${s.slice(
 const CNPJ_OBRIGATORIO_EM = Date.UTC(2026, 9, 30, 3, 0, 0);   // 00:00 de 30/10 em SP
 
 function avisoPrazoCnpj(loja) {
+  // ⚠️ b-av3 (Codex, P2): LOJA SEM FULL NAO PRECISA DESTE AVISO.
+  //
+  // Quem declarou `<PREFIXO>_FBS=0` nao usa Shopee Full — nao vai chamar a
+  // API, nao tem o que ligar, e receberia um alerta urgente sobre um prazo
+  // que nao a atinge.
+  //
+  // 📌 Alerta que nao cabe e como vermelho falso em teste: ensina a ignorar
+  // o que importa. GOOD e Girassol estao nesse caso hoje.
+  if (String(loja && loja.fbs) === 'nao') return null;
+
   // ⚠️ b-tdz2 (Codex, P2): LIGADO NAO E O MESMO QUE RESOLVIDO.
   //
   // Se a env esta ligada mas a loja nao tem CNPJ (empresa nova no Full, sem
@@ -127,6 +137,15 @@ function avisoPrazoCnpj(loja) {
     return `⚠️ FALTAM ${diasPra} DIA(S) pra a Shopee exigir o CNPJ no Full `
       + `(30/10/2026). Ligue ${env} no Render e rode uma busca pra conferir — `
       + `depois da data, sem isso a importacao de XML PARA.`;
+  }
+  // ⚠️ b-av3 (Codex, P2): depois do prazo ha DOIS motivos, e a acao e
+  // diferente. Minha mensagem so falava do primeiro — e mandaria ligar uma
+  // env que JA esta ligada, deixando o dono girando.
+  if (ligado) {
+    return `🚨 A SHOPEE JA EXIGE O CNPJ (desde 30/10/2026). ${env} esta `
+      + `ligado, mas esta loja NAO TEM CNPJ: nenhuma NF-e importada ainda `
+      + `(de onde ele sairia) e sem FBS_CNPJ_${String(loja.key || '').toUpperCase()}. `
+      + `Defina essa env com o CNPJ do emitente, ou importe uma nota primeiro.`;
   }
   return `🚨 A SHOPEE JA EXIGE O CNPJ (desde 30/10/2026) e ${env} NAO esta `
     + `ligado. A busca de XML do Shopee Full vai FALHAR ate ligar. `

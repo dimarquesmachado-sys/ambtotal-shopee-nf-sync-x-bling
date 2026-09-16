@@ -124,6 +124,44 @@ const src = fs.readFileSync(
      '⚠️ `estadoAtual` CALCULA o aviso (nao usa variavel de outra funcao)');
 }
 
+// ── ⚠️ e o aviso CHEGA na extensão ──────────────────────────────────
+//
+// As rotas `/fbs/ext/estado` e `/fbs/ext/buscar` REMONTAM o JSON — campo
+// novo do motor não chega sozinho. O aviso morreria ali, e a extensão é
+// onde o dono trabalha: o lugar que mais importa.
+{
+  const srv = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  ok((srv.match(/aviso_prazo/g) || []).length >= 2,
+     '⚠️ as 2 rotas da extensao repassam o aviso');
+  ok(/aviso_prazo: st\.aviso_prazo \|\| null/.test(srv),
+     '  /fbs/ext/estado (o que ela chama ao abrir o Bling)');
+  ok(/aviso_prazo: r\.aviso_prazo \|\| null/.test(srv),
+     '  /fbs/ext/buscar (o Ctrl+Alt+S)');
+}
+
+// ── e loja SEM Full não recebe este aviso ───────────────────────────
+//
+// ⚠️ Quem declarou `<PREFIXO>_FBS=0` não usa Shopee Full — receberia alerta
+// urgente sobre um prazo que não a atinge. Alerta que não cabe é como
+// vermelho falso em teste: ensina a ignorar o que importa.
+{
+  ok(/if \(String\(loja && loja\.fbs\) === 'nao'\) return null;/.test(src),
+     '⚠️ loja com `_FBS=0` nao recebe o aviso do CNPJ');
+}
+
+// ── ⚠️ e depois do prazo a mensagem distingue os 2 motivos ──────────
+//
+// Minha versão só falava de "env desligada" — e mandaria ligar uma env que
+// JÁ está ligada, deixando o dono girando.
+{
+  // ⚠️ o texto quebra entre linhas no fonte (template literal concatenado),
+  // entao procuro o pedaco que fica inteiro numa linha
+  ok(/NAO TEM CNPJ/.test(src) && /FBS_CNPJ_\$\{String\(loja\.key/.test(src),
+     '⚠️ env LIGADA sem CNPJ: aponta o CNPJ, nao a env');
+  ok(/NAO esta `\n\s*\+ `ligado/.test(src) || /NAO esta .+ligado/.test(src),
+     '  e env desligada: aponta a env');
+}
+
 console.log('');
 console.log(falhas === 0 ? '=== TODOS OS CASOS PASSARAM' : '=== ' + falhas + ' FALHA(S)');
 process.exit(falhas ? 1 : 0);
