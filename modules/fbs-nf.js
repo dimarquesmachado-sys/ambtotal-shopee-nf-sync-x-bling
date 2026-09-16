@@ -57,8 +57,38 @@ function ymdSP(d) {
 function ymdRotulo(n) { const s = String(n); return `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}`; }
 
 // ── ETAPA 1: gera as tarefas de um tipo de documento, devolve os request_id ──
+/* 16/09 — AVISO DA SHOPEE (e-mail de 16/09, válido a partir de 30/10/2026): o CNPJ passa a
+   ser OBRIGATÓRIO no generate_fbs_invoices, um por requisição, e precisa ser de filial
+   registrada do seller. Sem isso, a importação das NF-e do Full para de funcionar naquela
+   data — em silêncio do nosso lado, porque hoje a chamada simplesmente não manda o campo.
+
+   Por que atrás de uma chave (FBS_ENVIAR_CNPJ=1) e não ligado direto: não dá pra testar a API
+   da Shopee daqui, e mandar um campo novo ANTES de a mudança valer pode ser aceito ou pode
+   dar erro — e errar aqui derruba a importação de NF hoje, pra consertar um problema de
+   outubro. Com a chave, o dono liga, confere numa rodada e deixa ligado.
+
+   O que NÃO nos afeta, conferido: o `file_name` novo ({CNPJ}FULLInvoiceXML{n}.zip), porque
+   nós mesmos nomeamos os zips que salvamos; e os document_type novos, porque só pedimos os
+   que já usamos. */
+function cnpjDaLoja(loja) {
+  const env = 'FBS_CNPJ_' + String(loja.key || '').toUpperCase();
+  const v = String(process.env[env] || '').replace(/\D/g, '');
+  return v.length === 14 ? v : null;
+}
+
 async function fbsGerar(loja, start, end, documentType, fileType = 1, documentStatus = 1) {
-  const body = { batch_download: { start, end, document_type: documentType, file_type: fileType, document_status: documentStatus } };
+  const bd = { start, end, document_type: documentType, file_type: fileType, document_status: documentStatus };
+  if (String(process.env.FBS_ENVIAR_CNPJ || '') === '1') {
+    const cnpj = cnpjDaLoja(loja);
+    if (!cnpj) {
+      /* falha ALTO em vez de mandar sem o campo: a partir de 30/10 a requisição sem CNPJ é
+         recusada, e um erro claro aqui é melhor que um FAILED genérico da Shopee. */
+      throw new Error('FBS_ENVIAR_CNPJ está ligado mas falta FBS_CNPJ_' +
+        String(loja.key || '').toUpperCase() + ' (14 dígitos, da filial registrada na Shopee)');
+    }
+    bd.cnpj = cnpj;
+  }
+  const body = { batch_download: bd };
   const { ok, data } = await shopee.shopeeApiCall(loja, '/api/v2/order/generate_fbs_invoices', 'POST', body, null);
   if (!ok || (data && data.error)) throw new Error(`generate_fbs_invoices erro: ${JSON.stringify(data && (data.error || data))}`);
   const lista = (data && data.result_list) || [];
@@ -479,6 +509,7 @@ function estadoAtual(loja) {
 }
 
 module.exports = {
+  cnpjDaLoja,
   lerDePara, acharPorPedido, nfPedidoLoja, reconstruirDePara,
   NF_DIR, rotina, estadoAtual, marcarImportadas, chavesDoZip, caminhoZip, limpar,
   lerImportadas, nfEmitente, nfChave, ymdSP,
