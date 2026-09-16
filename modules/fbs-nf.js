@@ -412,6 +412,25 @@ function gravarImportadas(lojaKey, reg) {
    rotina sai calma dizendo o que viu — sem memória, sem classificar mensagem, sem risco. */
 
 async function rotina(loja, opts = {}) {
+  // ⚠️ b-tdz - A DECLARACAO VEM ANTES DE QUALQUER `return`.
+  //
+  // Eu tinha posto isto depois do gate "empresa sem Full" — e esse gate
+  // RETORNA, usando `aviso_prazo: avisoPrazo`. Resultado:
+  //   TypeError: Cannot access 'avisoPrazo' before initialization
+  //
+  // ⚠️ E o `node --check` NAO PEGA ISSO: e sintaxe valida, erro so em
+  // runtime. Quem pegou foi o teste `fbs-sem-full`, que exercita justamente
+  // o caminho da empresa SEM Full — o unico que passa por ali.
+  //
+  // 📌 E a regra 4.4 do dono, literal: "node --check NAO pega TDZ".
+// ⚠️ o lembrete de 30/10 aparece AQUI — na rotina que roda no cron e no
+  // painel. E o unico lugar que o dono olha de verdade.
+  //
+  // 📌 Vai no LOG e no CAMPO da resposta: o log pega o cron (que roda
+  // sozinho 4x por dia), o campo pega o painel (que ele abre pra trabalhar).
+  const avisoPrazo = avisoPrazoCnpj(loja);
+  if (avisoPrazo) console.warn(`[${loja.key} FBS] ${avisoPrazo}`);
+
   /* 13/09 — EMPRESA SEM SHOPEE FULL NÃO É ERRO. Só a AMB tem Full hoje; GOOD e Girassol
      devolviam FAILED na geração do documento, o que parecia falha e era ausência. Com a
      empresa declarando (<PREFIXO>_FBS=0) ou com o serviço aprendendo sozinho no modo auto,
@@ -420,13 +439,6 @@ async function rotina(loja, opts = {}) {
   if (decl === 'nao') {
     return { ok: true, aviso_prazo: avisoPrazo, sem_full: true, motivo: 'esta empresa não usa Shopee Full (declarado em ' + (loja.prefixo || '') + '_FBS=0)' };
   }
-// ⚠️ o lembrete de 30/10 aparece AQUI — na rotina que roda no cron e no
-  // painel. E o unico lugar que o dono olha de verdade.
-  //
-  // 📌 Vai no LOG e no CAMPO da resposta: o log pega o cron (que roda
-  // sozinho 4x por dia), o campo pega o painel (que ele abre pra trabalhar).
-  const avisoPrazo = avisoPrazoCnpj(loja);
-  if (avisoPrazo) console.warn(`[${loja.key} FBS] ${avisoPrazo}`);
 
   ensureDir(NF_DIR);
   try { limpar(loja.key); } catch (e) {}   // remove ZIPs antigos com timestamp

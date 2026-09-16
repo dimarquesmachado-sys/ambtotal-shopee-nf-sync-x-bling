@@ -46,6 +46,19 @@ const src = fs.readFileSync(
   const j = src.lastIndexOf('async function ', i);
   ok(/async function rotina/.test(src.slice(j, j + 30)),
      '  ⚠️ dentro de `rotina()` (a 1a versao caiu em `fbsBaixar`)');
+
+  // ⚠️ E ANTES DE QUALQUER `return` — TDZ.
+  //
+  // A 2a versao declarava depois do gate "empresa sem Full", que RETORNA
+  // usando o campo: `Cannot access 'avisoPrazo' before initialization`.
+  //
+  // 📌 `node --check` NAO pega: e sintaxe valida, erro so em runtime. Quem
+  // pegou foi o `fbs-sem-full`, que exercita o unico caminho que passa ali.
+  const iRotina = src.indexOf('async function rotina(loja, opts = {})');
+  const iDecl = src.indexOf('const avisoPrazo = avisoPrazoCnpj(loja)', iRotina);
+  const iPrimeiroReturn = src.indexOf('return {', iRotina);
+  ok(iDecl > 0 && iDecl < iPrimeiroReturn,
+     '  ⚠️ e ANTES do 1o `return` da funcao (TDZ — o `node --check` nao pega)');
 }
 
 // ── as fases, exercitadas ───────────────────────────────────────────
