@@ -93,11 +93,29 @@ function ymdRotulo(n) { const s = String(n); return `${s.slice(0, 4)}-${s.slice(
 //
 // ⚠️ A janela de 5 dias existe pra ele ligar e CONFERIR com calma, em vez de
 // descobrir no dia com o galpao operando.
-const CNPJ_OBRIGATORIO_EM = Date.UTC(2026, 9, 30);   // 30/10/2026 (mes 9 = outubro)
+// ⚠️ b-tdz2 (Codex, P2): a data e do CALENDARIO DE SAO PAULO, nao UTC.
+//
+// `Date.UTC(2026,9,30)` chega a zero as 21:00 de 29/10 em Sao Paulo — nas
+// 3 horas finais do dia 29 o aviso ja diria "atrasado", e o dono acharia
+// que perdeu o prazo tendo um dia inteiro pela frente.
+//
+// 📌 O resto deste modulo ja trata data em America/Sao_Paulo (ymdSP). Uso
+// 03:00 UTC = 00:00 em SP (UTC-3), entao a virada acontece na meia-noite
+// dele.
+const CNPJ_OBRIGATORIO_EM = Date.UTC(2026, 9, 30, 3, 0, 0);   // 00:00 de 30/10 em SP
 
 function avisoPrazoCnpj(loja) {
+  // ⚠️ b-tdz2 (Codex, P2): LIGADO NAO E O MESMO QUE RESOLVIDO.
+  //
+  // Se a env esta ligada mas a loja nao tem CNPJ (empresa nova no Full, sem
+  // nota importada ainda e sem `FBS_CNPJ_<LOJA>`), o `fbsGerar` manda SEM o
+  // campo — e depois de 30/10 a Shopee recusa.
+  //
+  // ⚠️ Eu calava o aviso justamente nesse caso: a env ligada dava a
+  // impressao de resolvido, e o unico sinal restante seria a busca falhando
+  // sem ninguem entender por que.
   const ligado = String(process.env.FBS_ENVIAR_CNPJ || '') === '1';
-  if (ligado) return null;   // ja resolvido, nao enche
+  if (ligado && cnpjDaLoja(loja)) return null;   // ligado E com CNPJ = resolvido
 
   const agora = Date.now();
   const diasPra = Math.ceil((CNPJ_OBRIGATORIO_EM - agora) / 864e5);
@@ -551,6 +569,12 @@ async function rotina(loja, opts = {}) {
   const deparaAdd = gravarDePara(loja.key, sep.saida.concat(sep.entrada));
   return {
     ok: true,
+    // ⚠️ b-tdz2 (Codex, P2): o retorno de SUCESSO nao levava o aviso.
+    //
+    // E o caso MAIS COMUM: a Shopee responde, ha notas, tudo certo — e
+    // era justamente aí que o lembrete de 30/10 sumia do painel. O aviso
+    // so aparecia quando algo dava errado, que e quando ele menos ajuda.
+    aviso_prazo: avisoPrazo,
     periodo: { de: ymdRotulo(start), ate: ymdRotulo(end) },
     status: st,
     emitente,
@@ -611,7 +635,12 @@ function estadoAtual(loja) {
   const meus = nomes.filter(n => n.startsWith(loja.key + '-') && /\.zip$/.test(n))
     .map(n => ({ n, t: (() => { try { return fs.statSync(path.join(NF_DIR, n)).mtimeMs; } catch (e) { return 0; } })() }))
     .sort((a, b) => b.t - a.t);
-  if (!meus.length) return { ok: true, aviso_prazo: avisoPrazo, precisa: false, motivo: 'nenhum arquivo baixado ainda', novas_saida: 0, novas_entrada: 0 };
+  // ⚠️ b-tdz2 (Codex, P1): esta e OUTRA funcao — `avisoPrazo` nao existe
+  // aqui. Minha substituicao em massa pegou este `return` tambem, e
+  // `/fbs/ext/estado` devolveria HTTP 500 pra quem nao tem ZIP ainda.
+  //
+  // 📌 3a vez que a troca automatica me pega hoje. Calculo o aviso aqui.
+  if (!meus.length) return { ok: true, aviso_prazo: avisoPrazoCnpj(loja), precisa: false, motivo: 'nenhum arquivo baixado ainda', novas_saida: 0, novas_entrada: 0 };
 
   const imp = lerImportadas(loja.key);
   const jaSaida = new Set(imp.saida), jaEntrada = new Set(imp.entrada);

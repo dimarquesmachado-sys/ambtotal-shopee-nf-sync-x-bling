@@ -23,8 +23,13 @@ const src = fs.readFileSync(
 
 // ── a data está no código ───────────────────────────────────────────
 {
-  ok(/const CNPJ_OBRIGATORIO_EM = Date\.UTC\(2026, 9, 30\)/.test(src),
-     '⚠️ a data 30/10/2026 esta no codigo (mes 9 = outubro em JS)');
+  // ⚠️ b-tdz2: a data ganhou hora (03:00 UTC = 00:00 em Sao Paulo).
+  //
+  // `Date.UTC(2026,9,30)` chegava a zero as 21:00 de 29/10 em SP — nas 3
+  // horas finais do dia 29 o aviso ja diria "atrasado", e o dono acharia
+  // que perdeu o prazo tendo um dia inteiro pela frente.
+  ok(/const CNPJ_OBRIGATORIO_EM = Date\.UTC\(2026, 9, 30, 3, 0, 0\)/.test(src),
+     '⚠️ a data e 00:00 de 30/10 em SAO PAULO (03:00 UTC), nao UTC puro');
   ok(/function avisoPrazoCnpj\(loja\)/.test(src),
      'ha uma funcao que decide o aviso');
 }
@@ -63,7 +68,7 @@ const src = fs.readFileSync(
 
 // ── as fases, exercitadas ───────────────────────────────────────────
 {
-  const EM = Date.UTC(2026, 9, 30);
+  const EM = Date.UTC(2026, 9, 30, 3, 0, 0);   // 00:00 em SP
   const aviso = (quando, ligado) => {
     if (ligado) return null;
     const d = Math.ceil((EM - Date.parse(quando)) / 864e5);
@@ -85,6 +90,38 @@ const src = fs.readFileSync(
   // ⚠️ e para de encher quando resolvido
   ok(aviso('2026-11-15T12:00:00Z', true) === null,
      '  ⚠️ com a env ligada: silencio (nao vira ruido de fundo)');
+
+  // ⚠️ LIGADO NAO E O MESMO QUE RESOLVIDO (Codex, P2).
+  //
+  // Se a env esta ligada mas a loja nao tem CNPJ (empresa nova no Full, sem
+  // nota importada e sem override), o pedido vai SEM o campo e a Shopee
+  // recusa. Eu calava o aviso justamente nesse caso.
+  ok(/if \(ligado && cnpjDaLoja\(loja\)\) return null;/.test(src),
+     '⚠️ so cala quando LIGADO **E** com CNPJ disponivel');
+  ok(!/if \(ligado\) return null;/.test(src),
+     '  (a versao que calava so pela env saiu)');
+}
+
+// ── ⚠️ e o aviso vai no retorno de SUCESSO ──────────────────────────
+//
+// Era o caso MAIS COMUM — Shopee responde, ha notas, tudo certo — e era
+// justamente aí que o lembrete sumia do painel. Só aparecia quando algo dava
+// errado, que é quando ele menos ajuda.
+{
+  const iSucesso = src.lastIndexOf('return {\n      ok: true,');
+  const bloco = iSucesso > 0 ? src.slice(iSucesso, iSucesso + 400) : '';
+  ok(/aviso_prazo: avisoPrazo,/.test(bloco),
+     '⚠️ o retorno de SUCESSO leva o aviso (era onde sumia)');
+}
+
+// ── e o `estadoAtual` calcula o proprio ─────────────────────────────
+//
+// ⚠️ Minha substituicao em massa pos `avisoPrazo` num `return` de OUTRA
+// funcao, onde a variavel nao existe: `/fbs/ext/estado` devolveria HTTP 500
+// pra quem nao tem ZIP ainda.
+{
+  ok(/aviso_prazo: avisoPrazoCnpj\(loja\), precisa: false/.test(src),
+     '⚠️ `estadoAtual` CALCULA o aviso (nao usa variavel de outra funcao)');
 }
 
 console.log('');
