@@ -156,8 +156,18 @@ const src = fs.readFileSync(
 {
   // ⚠️ o texto quebra entre linhas no fonte (template literal concatenado),
   // entao procuro o pedaco que fica inteiro numa linha
-  ok(/NAO TEM CNPJ/.test(src) && /FBS_CNPJ_\$\{String\(loja\.key/.test(src),
-     '⚠️ env LIGADA sem CNPJ: aponta o CNPJ, nao a env');
+  // ⚠️ b-av4: os DOIS momentos precisam distinguir — antes e depois do prazo.
+  //
+  // Eu corrigi so o "depois". Nos 5 dias ANTES, uma loja com a env ja ligada
+  // mas sem CNPJ ouviria "ligue a env" — que ja esta ligada — e gastaria a
+  // janela inteira de preparacao sem descobrir o que falta.
+  //
+  // 📌 A janela existe PRA ISSO. Mandar pro lugar errado a anula.
+  const vezes = (src.match(/NAO TEM CNPJ/g) || []).length;
+  ok(vezes >= 2,
+     `⚠️ a distincao aparece nos 2 momentos (antes e depois) — achei ${vezes}`);
+  ok(/FBS_CNPJ_\$\{String\(loja\.key/.test(src),
+     '  apontando a env do CNPJ, nao a de ligar');
   ok(/NAO esta `\n\s*\+ `ligado/.test(src) || /NAO esta .+ligado/.test(src),
      '  e env desligada: aponta a env');
 }

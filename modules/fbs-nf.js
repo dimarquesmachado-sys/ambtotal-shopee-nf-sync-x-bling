@@ -134,6 +134,22 @@ function avisoPrazoCnpj(loja) {
 
   const env = 'FBS_ENVIAR_CNPJ=1';
   if (diasPra > 0) {
+    // ⚠️ b-av4 (Codex): A JANELA DE AVISO TAMBEM TEM OS DOIS MOTIVOS.
+    //
+    // Eu corrigi so a mensagem DEPOIS do prazo. Nos 5 dias ANTES, uma loja
+    // com a env JA ligada mas sem CNPJ ouviria "ligue a env" — que ja esta
+    // ligada. Ela gastaria a janela inteira de preparacao sem descobrir o
+    // que realmente falta.
+    //
+    // 📌 E a janela existe PRA ISSO: descobrir e resolver com calma. Mandar
+    // pro lugar errado a anula.
+    if (ligado) {
+      return `⚠️ FALTAM ${diasPra} DIA(S) pra a Shopee exigir o CNPJ no Full `
+        + `(30/10/2026). ${env} ja esta ligado, mas esta loja NAO TEM CNPJ: `
+        + `nenhuma NF-e importada ainda (de onde ele sairia) e sem `
+        + `FBS_CNPJ_${String(loja.key || '').toUpperCase()}. Defina essa env, `
+        + `ou importe uma nota antes da data.`;
+    }
     return `⚠️ FALTAM ${diasPra} DIA(S) pra a Shopee exigir o CNPJ no Full `
       + `(30/10/2026). Ligue ${env} no Render e rode uma busca pra conferir — `
       + `depois da data, sem isso a importacao de XML PARA.`;
