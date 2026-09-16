@@ -30,14 +30,25 @@ Está atrás de uma chave de propósito: não dá para testar a API da Shopee da
 campo novo **antes** de a mudança valer pode ser aceito ou pode dar erro — errar aqui
 derrubaria a importação de hoje para consertar um problema de outubro.
 
+## O CNPJ o sistema descobre sozinho
+
+O dono confirmou que **não há CNPJ separado de filial** — é o mesmo da empresa. Então não há o
+que digitar: a **chave de acesso** de toda NF-e que já importamos carrega o CNPJ do emitente
+nas posições 7 a 20, e nós já guardamos essas chaves por loja para deduplicar.
+
+Usa-se o CNPJ **mais frequente** entre as notas de saída, não o da primeira: uma nota de outro
+emitente no meio do pacote (já aconteceu com pedido que o token alcança e não é da empresa)
+não pode decidir sozinha.
+
+`FBS_CNPJ_<LOJA>` continua existindo e **ganha** do descoberto — se um dia a Shopee exigir um
+CNPJ diferente, basta defini-la, sem mexer em código.
+
 ## O que falta, e quando
 
-1. **Pegar o CNPJ da filial registrada na Shopee** — da empresa que tem Full (hoje só a AMB).
-   Precisa ser o CNPJ da **filial cadastrada lá**, não necessariamente o da matriz.
-2. **Definir `FBS_CNPJ_AMB`** no Render e ligar `FBS_ENVIAR_CNPJ=1`.
-3. **Rodar uma vez e conferir** que as NF continuam chegando. Se a Shopee ainda não aceitar o
-   campo, é só desligar a chave e religar mais perto de 30/10.
-4. **Antes de 30/10**, garantir que a chave esteja ligada — depois dessa data ela deixa de ser
+1. **Ligar `FBS_ENVIAR_CNPJ=1`** no Render e rodar uma importação. Se a Shopee ainda não
+   aceitar o campo, é só desligar e religar mais perto de 30/10.
+2. **Antes de 30/10**, garantir que a chave esteja ligada — depois dessa data ela deixa de ser
    opcional.
 
-> Empresa nova com Shopee Full precisa do CNPJ dela aqui também.
+> Empresa nova com Shopee Full não precisa de configuração: assim que a primeira nota for
+> importada, o CNPJ dela é descoberto pela chave.
