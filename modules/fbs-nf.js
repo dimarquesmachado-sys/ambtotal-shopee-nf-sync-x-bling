@@ -76,6 +76,129 @@ function ymdRotulo(n) { const s = String(n); return `${s.slice(0, 4)}-${s.slice(
    por loja pra deduplicar. O dado estava em casa.
    A env continua existindo e GANHA do descoberto — se um dia a Shopee exigir um CNPJ de
    filial diferente, é só defini-la, sem mexer em código. */
+// ⚠️ O LEMBRETE DE 30/10 MORA NO CODIGO, NAO NA MEMORIA DE NINGUEM.
+//
+// [stated 16/09] "eu nao vou lembrar. vc consegue lembrar?" — nao de forma
+// confiavel: eu leio minhas anotacoes quando ele fala comigo, mas nada me
+// cutuca numa data.
+//
+// 📌 O que funciona e o que ele mesmo descobriu hoje: principio depende de
+// alguem lembrar; CODIGO AVISA SOZINHO. A data fica aqui, e o aviso aparece
+// justamente quando ele abre o painel pra trabalhar.
+//
+// O QUE ACONTECE, POR FASE:
+//   ate 24/10   silencio (nada a fazer, a Shopee recusa o campo hoje)
+//   25→29/10    AVISO: ligue a env, a virada esta chegando
+//   30/10 em diante, SEM a env:  ALERTA — a busca vai falhar
+//
+// ⚠️ A janela de 5 dias existe pra ele ligar e CONFERIR com calma, em vez de
+// descobrir no dia com o galpao operando.
+// ⚠️ b-tdz2 (Codex, P2): a data e do CALENDARIO DE SAO PAULO, nao UTC.
+//
+// `Date.UTC(2026,9,30)` chega a zero as 21:00 de 29/10 em Sao Paulo — nas
+// 3 horas finais do dia 29 o aviso ja diria "atrasado", e o dono acharia
+// que perdeu o prazo tendo um dia inteiro pela frente.
+//
+// 📌 O resto deste modulo ja trata data em America/Sao_Paulo (ymdSP). Uso
+// 03:00 UTC = 00:00 em SP (UTC-3), entao a virada acontece na meia-noite
+// dele.
+const CNPJ_OBRIGATORIO_EM = Date.UTC(2026, 9, 30, 3, 0, 0);   // 00:00 de 30/10 em SP
+
+function avisoPrazoCnpj(loja) {
+  // ⚠️ b-av3 (Codex, P2): LOJA SEM FULL NAO PRECISA DESTE AVISO.
+  //
+  // Quem declarou `<PREFIXO>_FBS=0` nao usa Shopee Full — nao vai chamar a
+  // API, nao tem o que ligar, e receberia um alerta urgente sobre um prazo
+  // que nao a atinge.
+  //
+  // 📌 Alerta que nao cabe e como vermelho falso em teste: ensina a ignorar
+  // o que importa. GOOD e Girassol estao nesse caso hoje.
+  if (String(loja && loja.fbs) === 'nao') return null;
+
+  // ⚠️ b-tdz2 (Codex, P2): LIGADO NAO E O MESMO QUE RESOLVIDO.
+  //
+  // Se a env esta ligada mas a loja nao tem CNPJ (empresa nova no Full, sem
+  // nota importada ainda e sem `FBS_CNPJ_<LOJA>`), o `fbsGerar` manda SEM o
+  // campo — e depois de 30/10 a Shopee recusa.
+  //
+  // ⚠️ Eu calava o aviso justamente nesse caso: a env ligada dava a
+  // impressao de resolvido, e o unico sinal restante seria a busca falhando
+  // sem ninguem entender por que.
+  const ligado = String(process.env.FBS_ENVIAR_CNPJ || '') === '1';
+  const temCnpj = !!cnpjDaLoja(loja);
+  // ⚠️ a funcao ja declara `agora` mais abaixo — reuso em vez de duplicar
+  const jaVale = Date.now() >= CNPJ_OBRIGATORIO_EM;
+
+  // ⚠️ b-av7 (Codex, P1) - "LIGADO E COM CNPJ" SO E BOM DEPOIS DA DATA.
+  //
+  // Eu calava o aviso sempre que a env estivesse ligada com CNPJ. Mas ANTES
+  // de 30/10 esse e o PIOR estado possivel: o `fbsGerar` manda o campo, a
+  // Shopee RECUSA (provado em producao hoje) e a importacao esta PARADA
+  // agora — e era justamente aí que eu ficava calado.
+  //
+  // 📌 Quem mais precisa do aviso era quem menos recebia.
+  if (!jaVale && ligado) {
+    return `🚨 ${'FBS_ENVIAR_CNPJ'}=1 esta LIGADO, mas a Shopee so aceita o `
+      + `CNPJ a partir de 30/10/2026 — ate la ela RECUSA o campo e a `
+      + `importacao de XML do Full esta PARADA. DESLIGUE a env no Render e `
+      + `ligue de novo no dia 30.`;
+  }
+  if (jaVale && ligado && temCnpj) return null;   // so DEPOIS da data e resolvido
+
+  const agora = Date.now();
+  const diasPra = Math.ceil((CNPJ_OBRIGATORIO_EM - agora) / 864e5);
+
+  if (diasPra > 5) return null;   // ainda cedo
+
+  const env = 'FBS_ENVIAR_CNPJ=1';
+  if (diasPra > 0) {
+    // ⚠️ b-av4 (Codex): A JANELA DE AVISO TAMBEM TEM OS DOIS MOTIVOS.
+    //
+    // Eu corrigi so a mensagem DEPOIS do prazo. Nos 5 dias ANTES, uma loja
+    // com a env JA ligada mas sem CNPJ ouviria "ligue a env" — que ja esta
+    // ligada. Ela gastaria a janela inteira de preparacao sem descobrir o
+    // que realmente falta.
+    //
+    // 📌 E a janela existe PRA ISSO: descobrir e resolver com calma. Mandar
+    // pro lugar errado a anula.
+    if (ligado) {
+      return `⚠️ FALTAM ${diasPra} DIA(S) pra a Shopee exigir o CNPJ no Full `
+        + `(30/10/2026). ${env} ja esta ligado, mas esta loja NAO TEM CNPJ: `
+        + `nenhuma NF-e importada ainda (de onde ele sairia) e sem `
+        + `FBS_CNPJ_${String(loja.key || '').toUpperCase()}. Defina essa env, `
+        + `ou importe uma nota antes da data.`;
+    }
+    // ⚠️ b-av6 (Codex) - NAO MANDAR LIGAR ANTES DA DATA. CONTRADICAO MINHA.
+    //
+    // A Shopee SO ACEITA o campo a partir de 30/10 — provado em producao
+    // hoje: o dono ligou a env e levou ERROR_SP_SERVICE_UNEXPECTED_V2, com a
+    // importacao parada ate apagar.
+    //
+    // ⚠️ E EU MANDAVA LIGAR NOS 5 DIAS ANTES. Seguir o meu proprio aviso
+    // QUEBRARIA a importacao hoje, pra prevenir algo que so acontece depois.
+    // E o MESMO erro do PR #22, que o dono ja pagou na pele.
+    //
+    // 📌 O aviso agora PREPARA em vez de mandar agir: diz a data, diz pra
+    // deixar pronto, e diz explicitamente pra NAO ligar antes.
+    return `⚠️ FALTAM ${diasPra} DIA(S) pra a Shopee exigir o CNPJ no Full `
+      + `(30/10/2026). NAO ligue ${env} ainda — antes da data a Shopee `
+      + `RECUSA o campo e a importacao para. No dia 30, ligue e rode uma `
+      + `busca pra conferir.`;
+  }
+  // ⚠️ b-av3 (Codex, P2): depois do prazo ha DOIS motivos, e a acao e
+  // diferente. Minha mensagem so falava do primeiro — e mandaria ligar uma
+  // env que JA esta ligada, deixando o dono girando.
+  if (ligado) {
+    return `🚨 A SHOPEE JA EXIGE O CNPJ (desde 30/10/2026). ${env} esta `
+      + `ligado, mas esta loja NAO TEM CNPJ: nenhuma NF-e importada ainda `
+      + `(de onde ele sairia) e sem FBS_CNPJ_${String(loja.key || '').toUpperCase()}. `
+      + `Defina essa env com o CNPJ do emitente, ou importe uma nota primeiro.`;
+  }
+  return `🚨 A SHOPEE JA EXIGE O CNPJ (desde 30/10/2026) e ${env} NAO esta `
+    + `ligado. A busca de XML do Shopee Full vai FALHAR ate ligar. `
+    + `Render > Shopee-Sync-Organizar-Envio-Coleta > Environment.`;
+}
+
 function cnpjDaChave(chave) {
   const c = String(chave || '').replace(/\D/g, '');
   return c.length === 44 ? c.slice(6, 20) : null;
@@ -354,6 +477,7 @@ function lerImportadas(lojaKey) {
   } catch (e) { return { quando: null, saida: [], entrada: [] }; }
 }
 function gravarImportadas(lojaKey, reg) {
+  
   ensureDir(NF_DIR);
   if (reg.saida.length > 5000) reg.saida = reg.saida.slice(-5000);
   if (reg.entrada.length > 5000) reg.entrada = reg.entrada.slice(-5000);
@@ -372,14 +496,34 @@ function gravarImportadas(lojaKey, reg) {
    rotina sai calma dizendo o que viu — sem memória, sem classificar mensagem, sem risco. */
 
 async function rotina(loja, opts = {}) {
+  // ⚠️ b-tdz - A DECLARACAO VEM ANTES DE QUALQUER `return`.
+  //
+  // Eu tinha posto isto depois do gate "empresa sem Full" — e esse gate
+  // RETORNA, usando `aviso_prazo: avisoPrazo`. Resultado:
+  //   TypeError: Cannot access 'avisoPrazo' before initialization
+  //
+  // ⚠️ E o `node --check` NAO PEGA ISSO: e sintaxe valida, erro so em
+  // runtime. Quem pegou foi o teste `fbs-sem-full`, que exercita justamente
+  // o caminho da empresa SEM Full — o unico que passa por ali.
+  //
+  // 📌 E a regra 4.4 do dono, literal: "node --check NAO pega TDZ".
+// ⚠️ o lembrete de 30/10 aparece AQUI — na rotina que roda no cron e no
+  // painel. E o unico lugar que o dono olha de verdade.
+  //
+  // 📌 Vai no LOG e no CAMPO da resposta: o log pega o cron (que roda
+  // sozinho 4x por dia), o campo pega o painel (que ele abre pra trabalhar).
+  const avisoPrazo = avisoPrazoCnpj(loja);
+  if (avisoPrazo) console.warn(`[${loja.key} FBS] ${avisoPrazo}`);
+
   /* 13/09 — EMPRESA SEM SHOPEE FULL NÃO É ERRO. Só a AMB tem Full hoje; GOOD e Girassol
      devolviam FAILED na geração do documento, o que parecia falha e era ausência. Com a
      empresa declarando (<PREFIXO>_FBS=0) ou com o serviço aprendendo sozinho no modo auto,
      a rotina sai limpa em vez de gritar — e a próxima empresa entra sem herdar alarme. */
   const decl = String(loja.fbs || 'auto');
   if (decl === 'nao') {
-    return { ok: true, sem_full: true, motivo: 'esta empresa não usa Shopee Full (declarado em ' + (loja.prefixo || '') + '_FBS=0)' };
+    return { ok: true, aviso_prazo: avisoPrazo, sem_full: true, motivo: 'esta empresa não usa Shopee Full (declarado em ' + (loja.prefixo || '') + '_FBS=0)' };
   }
+
   ensureDir(NF_DIR);
   try { limpar(loja.key); } catch (e) {}   // remove ZIPs antigos com timestamp
   const end = ymdSP();
@@ -423,6 +567,7 @@ async function rotina(loja, opts = {}) {
     const cnpjLigado = String(process.env.FBS_ENVIAR_CNPJ || '') === '1';
     return {
       ok: true,
+      aviso_prazo: avisoPrazo,
       // ⚠️ MANTENHO `sem_documento: true` — NAO mudo a semantica do campo.
       //
       // Minha 1a versao punha `!houveErro` aqui. Mas a EXTENSAO do navegador
@@ -453,7 +598,7 @@ async function rotina(loja, opts = {}) {
   const bufs = await fbsBaixar(loja, st.prontos);
   if (!bufs.length) {
     const msgs = (st.erros || []).map(e => e && e.msg).filter(Boolean);
-    return { ok: true, sem_documento: true, status: st,
+    return { ok: true, aviso_prazo: avisoPrazo, sem_documento: true, status: st,
              motivo: msgs.length
                ? ('a Shopee recusou os documentos (' + String(msgs[0]).slice(0, 200) + ') — se esta empresa não usa Full, declare ' + (loja.prefixo || '') + '_FBS=0 pra sair do ciclo')
                : 'nada baixado no período',
@@ -490,6 +635,12 @@ async function rotina(loja, opts = {}) {
   const deparaAdd = gravarDePara(loja.key, sep.saida.concat(sep.entrada));
   return {
     ok: true,
+    // ⚠️ b-tdz2 (Codex, P2): o retorno de SUCESSO nao levava o aviso.
+    //
+    // E o caso MAIS COMUM: a Shopee responde, ha notas, tudo certo — e
+    // era justamente aí que o lembrete de 30/10 sumia do painel. O aviso
+    // so aparecia quando algo dava errado, que e quando ele menos ajuda.
+    aviso_prazo: avisoPrazo,
     periodo: { de: ymdRotulo(start), ate: ymdRotulo(end) },
     status: st,
     emitente,
@@ -550,7 +701,12 @@ function estadoAtual(loja) {
   const meus = nomes.filter(n => n.startsWith(loja.key + '-') && /\.zip$/.test(n))
     .map(n => ({ n, t: (() => { try { return fs.statSync(path.join(NF_DIR, n)).mtimeMs; } catch (e) { return 0; } })() }))
     .sort((a, b) => b.t - a.t);
-  if (!meus.length) return { ok: true, precisa: false, motivo: 'nenhum arquivo baixado ainda', novas_saida: 0, novas_entrada: 0 };
+  // ⚠️ b-tdz2 (Codex, P1): esta e OUTRA funcao — `avisoPrazo` nao existe
+  // aqui. Minha substituicao em massa pegou este `return` tambem, e
+  // `/fbs/ext/estado` devolveria HTTP 500 pra quem nao tem ZIP ainda.
+  //
+  // 📌 3a vez que a troca automatica me pega hoje. Calculo o aviso aqui.
+  if (!meus.length) return { ok: true, aviso_prazo: avisoPrazoCnpj(loja), precisa: false, motivo: 'nenhum arquivo baixado ainda', novas_saida: 0, novas_entrada: 0 };
 
   const imp = lerImportadas(loja.key);
   const jaSaida = new Set(imp.saida), jaEntrada = new Set(imp.entrada);
@@ -581,6 +737,10 @@ function estadoAtual(loja) {
 }
 
 module.exports = {
+  // ⚠️ b-av5: a rota /fbs/pendentes precisa calcular o aviso por conta
+  // propria (ela nao passa pela `rotina`). Sem exportar, ela chamaria uma
+  // funcao inexistente — e o painel quebraria em vez de avisar.
+  avisoPrazoCnpj,
   cnpjDaLoja, cnpjDaChave,
   lerDePara, acharPorPedido, nfPedidoLoja, reconstruirDePara,
   NF_DIR, rotina, estadoAtual, marcarImportadas, chavesDoZip, caminhoZip, limpar,
