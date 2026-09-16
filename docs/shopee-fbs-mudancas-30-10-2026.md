@@ -43,6 +43,22 @@ não pode decidir sozinha.
 `FBS_CNPJ_<LOJA>` continua existindo e **ganha** do descoberto — se um dia a Shopee exigir um
 CNPJ diferente, basta defini-la, sem mexer em código.
 
+## E se uma empresa passar a ter Full depois?
+
+**Funciona sozinho, sem desfazer nada.** O serviço não guarda "esta empresa não tem Full" — a
+decisão de 13/09 foi justamente essa, depois de a primeira versão tentar deduzir pela mensagem
+de erro e errar de vários jeitos. Cada rodada pergunta à Shopee; se não há documento, sai
+calma.
+
+Então, no dia em que a Girassol ou a GOOD ligarem o Full:
+- se estiverem com `<PREFIXO>_FBS=0`, **tire a env** (ou ponha `1`);
+- se estiverem no modo automático, **não há nada a fazer** — a primeira nota que aparecer é
+  importada, e o CNPJ dela sai da chave de acesso.
+
+Sem CNPJ descoberto, a rotina **avisa e segue sem o campo** em vez de falhar: até 30/10 a
+Shopee ainda aceita, e depois dessa data recusar é o mesmo resultado que a empresa sem Full já
+tinha.
+
 ## O que falta, e quando
 
 1. **Ligar `FBS_ENVIAR_CNPJ=1`** no Render e rodar uma importação. Se a Shopee ainda não

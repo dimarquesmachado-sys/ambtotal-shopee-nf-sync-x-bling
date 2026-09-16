@@ -28,17 +28,23 @@ assert.strictEqual(m.cnpjDaLoja({ key: 'teste' }), null,
   'sem env e sem nota importada, devolve null — e o chamador falha ALTO em vez de mandar requisição incompleta');
 if (antes !== undefined) process.env.FBS_CNPJ_TESTE = antes;
 
-/* 16/09 — a mensagem de erro precisa separar DOIS casos que chegam aqui iguais: empresa que
-   TEM Full e ainda não importou nada (é só rodar uma importação) e empresa que NÃO tem Full
-   (nunca vai ter nota — o caminho é declarar <PREFIXO>_FBS=0). Só a AMB tem Full hoje, então
-   o segundo é o provável nas outras duas, e mandar o dono caçar CNPJ ali seria mandá-lo
-   investigar o lado errado. */
+/* 16/09 — a falta de CNPJ NÃO pode derrubar a rotina. A pergunta do dono ("e se uma empresa
+   passar a ter Full?") expôs que o `throw` que eu tinha posto quebrava o desenho de 13/09:
+   sem CNPJ, a empresa passava a FALHAR onde antes saía calma dizendo que não havia documento
+   — e o caso mais comum disso é justamente quem NÃO tem Full (Girassol e GOOD hoje).
+   Avisar e seguir sem o campo é melhor nos dois tempos: até 30/10 a Shopee ainda aceita sem
+   CNPJ, então nada muda; depois, ela recusa — que é o mesmo resultado que a empresa sem Full
+   já tinha. */
 {
   const fonte = require('fs').readFileSync(require('path').join(__dirname, '..', 'modules', 'fbs-nf.js'), 'utf8');
-  const msg = /throw new Error\('FBS_ENVIAR_CNPJ[\s\S]*?\);/.exec(fonte);
-  assert.ok(msg, 'não achei a mensagem de erro do CNPJ');
-  assert.ok(/TEM Shopee Full/.test(msg[0]), 'falta o caso de quem tem Full e não importou ainda');
-  assert.ok(/_FBS=0/.test(msg[0]), 'falta dizer o caminho de quem NÃO tem Full');
+  const bloco = /FBS_ENVIAR_CNPJ \|\| ''\) === '1'\) \{[\s\S]*?\n  \}/.exec(fonte);
+  assert.ok(bloco, 'não achei o bloco do CNPJ');
+  assert.ok(!/throw new Error/.test(bloco[0]),
+    'a falta de CNPJ não pode derrubar a rotina — quem não tem Full cairia aqui toda rodada');
+  assert.ok(/console\.warn/.test(bloco[0]), 'mas tem que AVISAR, senão some em silêncio');
+  assert.ok(/TEM Shopee Full/.test(bloco[0]) && /_FBS=0/.test(bloco[0]),
+    'o aviso tem que separar quem tem Full de quem não tem — são caminhos diferentes');
+  assert.ok(/30\/10/.test(bloco[0]), 'e lembrar a data em que a Shopee passa a recusar');
 }
 
 console.log('OK: CNPJ do FBS — descoberto pela chave de acesso das notas já importadas, com a env mandando quando existir');
