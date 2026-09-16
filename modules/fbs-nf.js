@@ -105,22 +105,24 @@ async function fbsGerar(loja, start, end, documentType, fileType = 1, documentSt
   const bd = { start, end, document_type: documentType, file_type: fileType, document_status: documentStatus };
   if (String(process.env.FBS_ENVIAR_CNPJ || '') === '1') {
     const cnpj = cnpjDaLoja(loja);
-    if (!cnpj) {
-      /* falha ALTO em vez de mandar sem o campo: a partir de 30/10 a requisição sem CNPJ é
-         recusada, e um erro claro aqui é melhor que um FAILED genérico da Shopee. */
-      /* 16/09 — a mensagem precisa separar DOIS casos que chegam aqui iguais, senão o dono
-         investiga o lado errado:
-           · empresa que TEM Full e ainda não importou nada → é só rodar uma importação;
-           · empresa em modo `auto` que na verdade NÃO tem Full → nunca vai ter nota, e o
-             caminho é declarar <PREFIXO>_FBS=0, não caçar CNPJ.
-         Só a AMB tem Full hoje, então o segundo caso é o provável nas outras duas. */
-      throw new Error('FBS_ENVIAR_CNPJ está ligado mas não consegui o CNPJ de "' + loja.key + '". ' +
-        'Se esta empresa TEM Shopee Full, rode uma importação antes (o CNPJ sai da chave de acesso ' +
-        'da primeira nota) ou defina FBS_CNPJ_' + String(loja.key || '').toUpperCase() + ' com 14 dígitos. ' +
-        'Se ela NÃO tem Full, declare ' + (loja.prefixo || '<PREFIXO>') + '_FBS=0 — aí a rotina sai limpa ' +
-        'em vez de tentar.');
+    if (cnpj) bd.cnpj = cnpj;
+    else {
+      /* 16/09 — NÃO derruba. A pergunta do dono ("e se uma empresa passar a ter Full?")
+         expôs que meu `throw` aqui quebrava o desenho de 13/09: sem CNPJ descoberto, a
+         empresa passava a FALHAR onde antes saía calma dizendo que não havia documento.
+         E o caso mais comum disso é justamente quem não tem Full — Girassol e GOOD hoje.
+         Avisar e seguir sem o campo é melhor nos dois tempos: até 30/10 a Shopee ainda
+         aceita sem CNPJ, então nada muda; depois de 30/10 ela recusa, e recusar é o MESMO
+         resultado que a empresa sem Full já tinha. Quem tem Full não cai aqui: basta uma
+         nota importada pra o CNPJ sair da chave de acesso.
+         O ovo-e-galinha real — empresa COM Full, nenhuma nota ainda, depois de 30/10 — é
+         pra isso que a env existe. */
+      console.warn('[' + loja.key + ' FBS] sem CNPJ pra mandar: nenhuma NF-e importada ainda. ' +
+        'Se esta empresa TEM Shopee Full, a primeira importação já resolve (o CNPJ sai da chave de ' +
+        'acesso) ou defina FBS_CNPJ_' + String(loja.key || '').toUpperCase() + '. Se ela NÃO tem Full, ' +
+        'declare ' + (loja.prefixo || '<PREFIXO>') + '_FBS=0 e a rotina sai limpa. Seguindo sem o campo — ' +
+        'a partir de 30/10/2026 a Shopee recusa a requisição sem CNPJ.');
     }
-    bd.cnpj = cnpj;
   }
   const body = { batch_download: bd };
   const { ok, data } = await shopee.shopeeApiCall(loja, '/api/v2/order/generate_fbs_invoices', 'POST', body, null);
