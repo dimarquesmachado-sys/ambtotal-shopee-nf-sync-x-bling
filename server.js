@@ -399,6 +399,30 @@ app.get('/:loja/interno/escrow-lote', resolverLoja, async (req, res) => {
 // Conserto: so atende quando pedirem explicitamente ?cru=1. Sem isso, passa
 // adiante e a rota principal responde, como era antes de 06/08. O caminho
 // continua existindo pra quem usa o modo cru — agora sem sequestrar o resto.
+// Anuncio do pedido (pedido do dono, 08/10): o Devolucoes mostra no card de devolucao com VARIOS produtos o titulo,
+// o SKU e o preco do que foi vendido. Usa o mesmo get_order_detail (item_list) que o servico ja chama; protegido pela
+// INTERNAL_KEY/ADMIN_KEY como as outras rotas internas. So leitura.
+app.get('/:loja/interno/anuncio-do-pedido', resolverLoja, async (req, res) => {
+  if (!_shopeeAuthOk(req)) return res.status(401).json({ ok: false, erro: 'chave invalida - use a INTERNAL_KEY ou a ADMIN_KEY DESTE servico' });
+  const sn = String(req.query.sn || req.query.order_sn || '').trim();
+  if (!sn) return res.status(400).json({ ok: false, erro: 'faltou ?sn=ORDER_SN' });
+  try {
+    const dets = await shopee.buscarDetalhesPedidos(req.loja, [sn]);
+    const ped = (dets || []).find((o) => String(o.order_sn) === sn);
+    if (!ped) return res.status(404).json({ ok: false, erro: 'pedido nao encontrado na Shopee', sn });
+    const itens = (ped.item_list || []).map((i) => ({
+      titulo: i.item_name || null,
+      variacao: i.model_name || null,
+      sku: i.model_sku || i.item_sku || null,
+      preco: (i.model_discounted_price != null ? i.model_discounted_price : i.model_original_price) || null,
+      qtd: i.model_quantity_purchased || null,
+    }));
+    return res.json({ ok: true, sn, itens });
+  } catch (e) {
+    return res.status(502).json({ ok: false, erro: String(e.message || e).slice(0, 200) });
+  }
+});
+
 app.get('/:loja/interno/devolucoes', resolverLoja, async (req, res, next) => {
   if (req.query.cru !== '1') return next();
   if (!_shopeeAuthOk(req)) return res.status(401).json({ ok: false, erro: 'chave invalida - use a INTERNAL_KEY ou a ADMIN_KEY DESTE servico' });
