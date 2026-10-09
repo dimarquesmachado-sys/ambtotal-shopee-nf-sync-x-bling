@@ -414,7 +414,8 @@ app.get('/:loja/interno/anuncio-do-pedido', resolverLoja, async (req, res) => {
       titulo: i.item_name || null,
       variacao: i.model_name || null,
       sku: i.model_sku || i.item_sku || null,
-      preco: (i.model_discounted_price != null ? i.model_discounted_price : i.model_original_price) || null,
+      // Codex #27: preco 0 (brinde de promocao) e preco de verdade — so 'sem preco' vira null
+      preco: (i.model_discounted_price != null ? i.model_discounted_price : (i.model_original_price != null ? i.model_original_price : null)),
       qtd: i.model_quantity_purchased || null,
     }));
     return res.json({ ok: true, sn, itens });
