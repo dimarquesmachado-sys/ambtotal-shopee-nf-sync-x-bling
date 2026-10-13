@@ -25,10 +25,38 @@ async function aguardarThrottle() {
   ultimaChamada = Date.now();
 }
 
+// 13/10 (dono: 'descobre' quem consome a cota do Bling) — este servico chamava o Bling das 3 lojas DIRETO, sem passar
+// pelo porteiro central (Mover-Pedidos /bling-ritmo). Agora, com BLING_RITMO_URL e BLING_RITMO_KEY no ambiente, cada
+// chamada pede a vez na conta da loja (servico=shopee-nf-sync, prioridade operacao — o ciclo de NF e operacao) e avisa
+// os 429. Sem as variaveis, ou com o porteiro fora do ar, segue no ritmo local de sempre (falha aberta, nunca trava).
+const RITMO_URL = (process.env.BLING_RITMO_URL || '').replace(/\/+$/, '');
+const RITMO_KEY = process.env.BLING_RITMO_KEY || '';
+const RITMO_SERVICO = process.env.BLING_RITMO_SERVICO || 'shopee-nf-sync';
+let ritmoForaAte = 0;   // circuito: porteiro sem responder -> 30 s sem perguntar
+async function ritmoChamar(rota, params) {
+  if (!RITMO_URL || !RITMO_KEY || Date.now() < ritmoForaAte) return null;
+  try {
+    const qs = new URLSearchParams(Object.assign({ servico: RITMO_SERVICO, prioridade: 'operacao' }, params)).toString();
+    const r = await fetch(RITMO_URL + '/bling-ritmo/' + rota + '?' + qs, { method: 'POST', timeout: 1500, headers: { 'x-ritmo-key': RITMO_KEY } });
+    if (!r.ok) { ritmoForaAte = Date.now() + 30000; return null; }
+    return await r.json();
+  } catch (e) { ritmoForaAte = Date.now() + 30000; return null; }
+}
+async function pedirVez(loja) {
+  const ate = Date.now() + 60000;   // nunca segura uma NF mais de 1 min esperando a vez (falha aberta)
+  while (Date.now() < ate) {
+    const r = await ritmoChamar('permissao', { conta: loja.key });
+    if (!r || r.ok) return (r && r.ficha) || null;
+    const ms = r.esperar_ms || (r.pausa_s ? r.pausa_s * 1000 : 500);
+    await new Promise(res => setTimeout(res, Math.min(Math.max(ms, 50), 10000)));
+  }
+  return null;
+}
 async function blingFetch(loja, url, options = {}, tentativa = 1) {
-  await aguardarThrottle();
-
+  // Codex #28: o token (que pode ser renovado pela rede) vem ANTES da vez — a vez vale pra chamada que sai logo em seguida
   let token = await getValidBlingToken(loja);
+  let ficha = await pedirVez(loja);   // 13/10: vez no porteiro (sem env: nada muda)
+  await aguardarThrottle();
   let response = await fetch(url, {
     ...options,
     headers: {
@@ -42,6 +70,7 @@ async function blingFetch(loja, url, options = {}, tentativa = 1) {
   if (response.status === 401) {
     console.log(`[bling-api][${loja.key}] 401 recebido, forcando refresh token`);
     const newTokens = await refreshBlingToken(loja);
+    ficha = await pedirVez(loja);   // Codex #28: a 2a chamada ao Bling (depois do refresh) tambem pede a vez
     await aguardarThrottle();
     response = await fetch(url, {
       ...options,
@@ -55,6 +84,11 @@ async function blingFetch(loja, url, options = {}, tentativa = 1) {
   }
 
   // 429 = rate limit. Espera 1.2s e tenta de novo (ate 3 vezes).
+  if (response.status === 429) {   // 13/10: o porteiro fica sabendo (e os outros servicos recuam junto)
+    ritmoChamar('aviso-429', { conta: loja.key, retry_after_s: response.headers.get('retry-after') || '', ficha: ficha || '' }).catch(() => {});
+  } else if (response.ok && ficha) {
+    ritmoChamar('aviso-ok', { conta: loja.key, ficha }).catch(() => {});
+  }
   if (response.status === 429 && tentativa <= 3) {
     console.log(`[bling-api][${loja.key}] 429 rate limit, tentativa ${tentativa}, aguardando 1.2s`);
     await new Promise(r => setTimeout(r, 1200));
