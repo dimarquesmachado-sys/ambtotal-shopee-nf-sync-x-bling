@@ -53,10 +53,10 @@ async function pedirVez(loja) {
   return null;
 }
 async function blingFetch(loja, url, options = {}, tentativa = 1) {
+  // Codex #28: o token (que pode ser renovado pela rede) vem ANTES da vez — a vez vale pra chamada que sai logo em seguida
+  let token = await getValidBlingToken(loja);
   let ficha = await pedirVez(loja);   // 13/10: vez no porteiro (sem env: nada muda)
   await aguardarThrottle();
-
-  let token = await getValidBlingToken(loja);
   let response = await fetch(url, {
     ...options,
     headers: {
