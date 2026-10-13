@@ -53,7 +53,7 @@ async function pedirVez(loja) {
   return null;
 }
 async function blingFetch(loja, url, options = {}, tentativa = 1) {
-  const ficha = await pedirVez(loja);   // 13/10: vez no porteiro (sem env: nada muda)
+  let ficha = await pedirVez(loja);   // 13/10: vez no porteiro (sem env: nada muda)
   await aguardarThrottle();
 
   let token = await getValidBlingToken(loja);
@@ -70,6 +70,7 @@ async function blingFetch(loja, url, options = {}, tentativa = 1) {
   if (response.status === 401) {
     console.log(`[bling-api][${loja.key}] 401 recebido, forcando refresh token`);
     const newTokens = await refreshBlingToken(loja);
+    ficha = await pedirVez(loja);   // Codex #28: a 2a chamada ao Bling (depois do refresh) tambem pede a vez
     await aguardarThrottle();
     response = await fetch(url, {
       ...options,

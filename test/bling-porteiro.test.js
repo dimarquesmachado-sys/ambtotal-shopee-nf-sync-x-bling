@@ -28,6 +28,13 @@ require.cache[require.resolve(tm)] = { id: tm, filename: tm, loaded: true, expor
   await fn(loja, 'https://api.bling.com.br/Api/v3/nfe?pagina=2', {}, 4);   // tentativa 4: nao repete
   await new Promise((r) => setTimeout(r, 20));
   ok(chamadas.some((u) => /bling-ritmo\/aviso-429/.test(u) && /conta=girassol/.test(u) && /servico=shopee-nf-sync/.test(u)), '⚠️ o 429 vai pro porteiro com o nome do servico');
+  // Codex #28: o 401 (token vencido) refaz a chamada — ela tambem pede a vez
+  chamadas.length = 0; respBling = 401; let n = 0;
+  const fetchOrig = require.cache[require.resolve('node-fetch')].exports;
+  require.cache[require.resolve('node-fetch')].exports = async (url, op) => { if (!/bling-ritmo/.test(url)) { n++; if (n === 2) respBling = 200; } return fetchOrig(url, op); };
+  await fn(loja, 'https://api.bling.com.br/Api/v3/nfe?pagina=3');
+  const perms = chamadas.filter((u) => /bling-ritmo\/permissao/.test(u)).length;
+  ok(perms === 2, '⚠️ depois do 401 a chamada refeita pede a vez de novo (2 permissoes pra 2 chamadas ao Bling) (' + perms + ')');
   console.log('');
   console.log(falhas === 0 ? '=== TODOS OS CASOS PASSARAM' : '=== ' + falhas + ' FALHA(S)');
   process.exit(falhas ? 1 : 0);
