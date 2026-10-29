@@ -64,28 +64,42 @@ function aplicar(item, reg) {
   if (!item.tracking_number && reg.tracking) item.tracking_number = reg.tracking;
 }
 
-// o: { buscarDetalhe(return_sn) -> detalhe | null, cache: Map, max, pausaMs, dorme }
+// o: { buscarDetalhe(return_sn) -> detalhe | null, cache: Map, max, pausaMs, dorme, agora }
 // devolve { chamadas, do_cache, sem_resposta, adiadas }
+// Codex #30: RODIZIO — as que precisam de consulta vao numa fila por 'ultima tentativa' (nunca tentada primeiro).
+// Antes, 40 que falhassem sempre gastavam o teto inteiro toda vez e as seguintes nunca eram consultadas.
 async function hidratar(dados, o) {
   const cache = o.cache;
   const max = Number.isFinite(o.max) ? o.max : 40;
   const dorme = o.dorme || ((ms) => new Promise((r) => setTimeout(r, ms)));
+  const agora = o.agora || (() => Date.now());
   let chamadas = 0, doCache = 0, semResposta = 0, adiadas = 0;
+  const fila = [];
   for (const item of dados) {
     if (!precisaDetalhe(item)) continue;
     const c = cache.get(item.return_sn);
-    if (c && item.update_time && c.upd === item.update_time) { aplicar(item, c); doCache++; continue; }
+    if (c && !c.falhou && item.update_time && c.upd === item.update_time) { aplicar(item, c); doCache++; continue; }
+    fila.push({ item, c, ult: (c && c.tentou_em) || 0 });
+  }
+  fila.sort((a, b) => a.ult - b.ult);
+  for (const { item, c } of fila) {
     if (chamadas >= max) { adiadas++; if (c) aplicar(item, c); continue; }   // o resto vem na proxima atualizacao
     if (chamadas > 0) await dorme(o.pausaMs == null ? 250 : o.pausaMs);
     chamadas++;
     let det = null;
     try { det = await o.buscarDetalhe(item.return_sn); } catch (e) { det = null; }
-    if (!det) { semResposta++; if (c) aplicar(item, c); continue; }          // falhou: mantem o que ja sabia
+    if (!det) {                                                                // falhou: mantem o que ja sabia
+      semResposta++;
+      cache.set(item.return_sn, Object.assign({}, c || {}, { falhou: true, tentou_em: agora() }));
+      if (c) aplicar(item, c);
+      continue;
+    }
     const reg = {
       upd: item.update_time || null,
       logistics_status: det.logistics_status || null,
       reverse_logistics_status: det.reverse_logistics_status || null,
       tracking: trackingDoDetalhe(det),
+      tentou_em: agora(),
     };
     cache.set(item.return_sn, reg);
     aplicar(item, reg);

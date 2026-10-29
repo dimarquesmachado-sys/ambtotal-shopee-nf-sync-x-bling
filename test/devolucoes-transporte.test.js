@@ -50,6 +50,16 @@ const DETALHE = {
   const muitas = Array.from({ length: 50 }, (_, i) => det.normalizarDaLista({ return_sn: 'R' + i, status: 'ACCEPTED', tracking_number: 'T' + i, update_time: 1, return_solution: 0 }));
   const r5 = await det.hidratar(muitas, { cache: new Map(), max: 40, buscarDetalhe: async () => ({ logistics_status: 'LOGISTICS_PICKUP_DONE' }), dorme: async () => {} });
   ok(r5.chamadas === 40 && r5.adiadas === 10, '  teto de 40 consultas por atualizacao; as outras 10 vem na proxima');
+  // Codex #30: 40 que falham sempre NAO travam as seguintes (rodizio pela ultima tentativa)
+  { const cacheR = new Map(); let relogio = 1000;
+    const lista = Array.from({ length: 40 }, (_, i) => det.normalizarDaLista({ return_sn: 'F' + i, status: 'ACCEPTED', tracking_number: 'T' + i, update_time: 5, return_solution: 0 }))
+      .concat([det.normalizarDaLista({ return_sn: 'BOA', status: 'ACCEPTED', tracking_number: '', update_time: 5, return_solution: 0 })]);
+    const busca = async (sn) => (sn === 'BOA' ? { logistics_status: 'LOGISTICS_DELIVERY_DONE', tracking_number: 'TBOA' } : null);
+    const opt = { cache: cacheR, max: 40, buscarDetalhe: busca, dorme: async () => {}, agora: () => relogio++ };
+    let d1 = lista.map((x) => Object.assign({}, x)); await det.hidratar(d1, opt);
+    let d2 = lista.map((x) => Object.assign({}, x)); await det.hidratar(d2, opt);
+    const boa = d2.find((x) => x.return_sn === 'BOA');
+    ok(boa.logistics_status === 'LOGISTICS_DELIVERY_DONE' && boa.tracking_number === 'TBOA', '⚠️ 40 que falham sempre nao travam a 41a: na atualizacao seguinte ela e consultada (rodizio — Codex #30)'); }
   // a rota usa o modulo
   const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'server.js'), 'utf8');
   ok(/const dados = unicos\.map\(_detDev\.normalizarDaLista\);/.test(src) && /await _detDev\.hidratar\(dados,/.test(src), '⚠️ a rota /:loja/interno/devolucoes usa o modulo');
