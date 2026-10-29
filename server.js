@@ -834,6 +834,8 @@ setInterval(_preAquecerIndices, 25 * 60 * 1000);
 // resposta crua da Shopee (1a pagina) pra depurar nomes de campos.
 // =============================================================================
 const _cacheDevolucoesLoja = {};
+// 29/10: transporte de cada devolucao aberta (vem do get_return_detail), por loja: return_sn -> { upd, ... }
+const _cacheDetalheDevLoja = {};
 
 // v2.4.2 - DIAGNOSTICO DE CHAVE: nao revela segredo nenhum, so compara TAMANHOS.
 // Responde se a chave que chegou na URL bate com a INTERNAL_KEY ou a ADMIN_KEY
@@ -1306,42 +1308,23 @@ app.get('/:loja/interno/devolucoes', resolverLoja, async (req, res) => {
       return true;
     });
 
-    const dados = unicos.map(d => ({
-      return_sn: d.return_sn || null,
-      order_sn: d.order_sn || null,
-      status: d.status || null,
-      reason: d.reason || null,
-      tracking_number: d.tracking_number || null,
-      create_time: d.create_time || null,
-      update_time: d.update_time || null,
-      itens: Array.isArray(d.item) ? d.item.map(i => ({
-        nome: i.name || null,
-        sku: i.item_sku || i.variation_sku || null,
-        qtd: i.amount || null,
-      })) : [],
-    }));
-
-    // Hidrata tracking faltante pelo get_return_detail (poucos casos).
-    // Caca o tracking em campos alternativos - a Shopee varia o ninho.
-    const semTracking = dados.filter(x => !x.tracking_number && x.return_sn).slice(0, 60);
-    for (const item of semTracking) {
-      await new Promise(s => setTimeout(s, 250));
-      const rd = await shopee.shopeeApiCall(loja, '/api/v2/returns/get_return_detail', 'GET', null,
-        `return_sn=${encodeURIComponent(item.return_sn)}`);
-      const det = rd.ok ? rd.data?.response : null;
-      if (!det) continue;
-      const candidato = det.tracking_number
-        || (det.return_pickup && det.return_pickup.tracking_number)
-        || (det.logistics && det.logistics.tracking_number)
-        || (Array.isArray(det.return_tracking_info) && det.return_tracking_info[0] && det.return_tracking_info[0].tracking_number)
-        || null;
-      if (candidato) {
-        item.tracking_number = candidato;
-      } else {
-        console.log(`[interno/devolucoes][${loja.key}] ${item.return_sn}: detail sem tracking. Campos: ${Object.keys(det).join(',').slice(0, 300)}`);
-      }
-    }
-
+    // 29/10: a lista passa adiante a solucao (so reembolso x retorno) e os prazos, e as devolucoes ABERTAS ganham o
+    // transporte pelo detalhe (a lista da Shopee nao traz) — modules/shopee-devolucoes-detalhe.js. Inclui a cacada do
+    // rastreio que faltava (antes: ate 60 detalhes por atualizacao, so pra quem vinha sem rastreio).
+    const _detDev = require('./modules/shopee-devolucoes-detalhe');
+    const dados = unicos.map(_detDev.normalizarDaLista);
+    if (!_cacheDetalheDevLoja[loja.key]) _cacheDetalheDevLoja[loja.key] = new Map();
+    const _hid = await _detDev.hidratar(dados, {
+      cache: _cacheDetalheDevLoja[loja.key],
+      max: 40,
+      buscarDetalhe: async (sn) => {
+        const rd = await shopee.shopeeApiCall(loja, '/api/v2/returns/get_return_detail', 'GET', null,
+          `return_sn=${encodeURIComponent(sn)}`);
+        return rd.ok ? (rd.data && rd.data.response) || null : null;
+      },
+    });
+    console.log(`[interno/devolucoes][${loja.key}] detalhe: ${_hid.chamadas} consultado(s), ${_hid.do_cache} do cache,`
+      + ` ${_hid.sem_resposta} sem resposta, ${_hid.adiadas} pra proxima atualizacao`);
     _cacheDevolucoesLoja[loja.key] = { ts: Date.now(), dados };
     console.log(`[interno/devolucoes][${loja.key}] ${dados.length} devolucoes (${dias}d, base pag ${basePagina})`);
     const resposta = { ok: true, cache: false, qtd: dados.length, devolucoes: dados };
