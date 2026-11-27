@@ -26,10 +26,21 @@
 
    "Não sei" ≠ "não tem": tipo com tarefa ainda processando, com download que
    falhou ou com a geração recusada sai como INCOMPLETO, nunca como "sem documento".
+
+   v2 (27/11, depois da 1ª rodada em produção — AMB, 119 dias): os tipos 2 e 5
+   voltaram "FAILED" e os tipos 3 e 6 seguiam processando depois de 2 minutos. A
+   resposta dizia só "FAILED" (o motivo, se a Shopee manda, estava num campo que
+   ninguém lia) e a única saída pra tarefa lenta era pedir tudo de novo. Agora:
+     - toda tarefa que não ficou pronta sai com o que a Shopee disse dela, CRU
+       (só campos simples; link nenhum) — pra ler o motivo em vez de supor;
+     - a resposta traz `continuar`: as tarefas ainda processando, prontas pra
+       colar na URL (&tarefas=tipo:numero,...). A chamada seguinte NÃO pede nada
+       de novo à Shopee: só confere e baixa o que ficou pronto.
    ═════════════════════════════════════════════════════════════════════════════ */
 
 const AdmZip = require('adm-zip');
 const fbsNf = require('./fbs-nf');
+const shopee = require('./shopee-api');
 
 // nomes do SDK (cabeçalho do fbs-nf.js) — rótulo de leitura, não medição
 const NOME_NO_SDK = { 1: 'Remessa', 2: 'Return', 3: 'Retorno simbolico', 4: 'Venda', 5: 'Entrada', 6: 'Remessa simbolica' };
@@ -37,6 +48,7 @@ const TIPOS_PADRAO = [2, 3, 5, 6];          // tudo o que a rotina NÃO pede hoj
 const MAX_DIAS = 124;                        // ~4 meses por chamada
 const LIMITE_PADRAO = 200;                   // notas listadas na resposta (o resumo conta todas)
 const LIMITE_MAX = 1000;
+const MAX_TAREFAS = 24;                      // tarefas retomadas por chamada (&tarefas=)
 
 const EM_ANDAMENTO = new Set();              // uma sonda por loja de cada vez (F5 no meio não dobra as tarefas na Shopee)
 
@@ -94,6 +106,50 @@ function lerTipos(bruto) {
   }
   if (!tipos.length) return invalido('nenhum tipo de documento informado');
   return { ok: true, tipos };
+}
+
+/* &tarefas=3:111,6:222 — as tarefas de uma sonda anterior que ficaram processando (o campo `continuar`
+   da resposta traz isto pronto). Numero de ate 15 digitos: acima disso o JavaScript ja nao guarda inteiro exato. */
+function lerTarefas(bruto) {
+  /* Codex #32: na 2a retomada a URL ja tem um &tarefas= e o `continuar` manda acrescentar outro no fim — o Express
+     entrega os dois numa lista. Vale o ULTIMO (o mais novo, o que acabou de ser colado); juntar os dois repetia a
+     tarefa e a retomada morria em 400 "tarefa repetida" justamente quando a tarefa era lenta. */
+  if (Array.isArray(bruto)) { const validos = bruto.filter((x) => x != null && String(x).trim() !== ''); bruto = validos.length ? validos[validos.length - 1] : ''; }
+  const partes = String(bruto).split(',').map((x) => x.trim()).filter((x) => x !== '');
+  if (!partes.length) return invalido('nenhuma tarefa informada em &tarefas=');
+  if (partes.length > MAX_TAREFAS) return invalido('tarefas demais em &tarefas= (o teto e ' + MAX_TAREFAS + ' por chamada)');
+  const porTipo = new Map(); const vistos = new Set();
+  for (const p of partes) {
+    const m = /^([1-6]):(\d{1,15})$/.exec(p);
+    if (!m) return invalido('tarefa invalida em &tarefas=: "' + p.slice(0, 30) + '" (o formato e tipo:numero, como vem no campo "continuar" da resposta anterior)');
+    const tipo = Number(m[1]); const id = Number(m[2]);
+    if (vistos.has(id)) return invalido('tarefa repetida em &tarefas=: ' + id);
+    vistos.add(id);
+    if (!porTipo.has(tipo)) porTipo.set(tipo, []);
+    porTipo.get(tipo).push(id);
+  }
+  return { ok: true, porTipo };
+}
+
+/* O que a Shopee diz de uma TAREFA, cru: so campos simples (texto cortado), e link nenhum — o link de
+   download e assinado e vale por meia hora; esta resposta e colada em conversa. E metadado da tarefa, nao da nota. */
+function soCamposSimples(item) {
+  const o = {};
+  for (const k of Object.keys(item || {})) {
+    const v = item[k];
+    if (typeof v === 'string') o[k] = /^\s*https?:\/\//i.test(v) ? '(link omitido)' : v.slice(0, 300);
+    else if (typeof v === 'number' || typeof v === 'boolean' || v === null) o[k] = v;
+  }
+  return o;
+}
+
+// a situacao das tarefas, como a Shopee devolve (o fbsAguardar do motor so guarda pronto/erro/processando)
+/* Codex #32: o shopeeApiCall NAO joga erro quando a Shopee recusa — devolve { ok:false, data:{ error } }. Sem olhar
+   isso, a recusa virava "lista vazia": a resposta saia sem o que a Shopee disse E sem dizer que a consulta falhou. */
+async function situacaoCrua(loja, ids) {
+  const { ok, data } = await shopee.shopeeApiCall(loja, '/api/v2/order/get_fbs_invoices_result', 'POST', { request_id_list: { request_id: ids.map(Number) } }, null);
+  if (!ok || (data && data.error)) throw new Error('get_fbs_invoices_result erro: ' + String(JSON.stringify(data && (data.error || data.message || data)) || 'sem corpo').slice(0, 160));
+  return (data && data.result_list) || [];
 }
 
 function lerLimite(bruto) {
@@ -179,27 +235,42 @@ function resumir(notas) {
 async function sondarTipos(loja, opts = {}) {
   const io = Object.assign({
     gerar: fbsNf.fbsGerar, aguardar: fbsNf.fbsAguardar, baixar: fbsNf.fbsBaixar,
-    importadas: fbsNf.lerImportadas, hoje: () => fbsNf.ymdSP(),
+    importadas: fbsNf.lerImportadas, hoje: () => fbsNf.ymdSP(), situacao: situacaoCrua,
   }, opts.io || {});
 
   const rotinaHoje = { tipos_pedidos: fbsNf.tiposDoc(), env_FBS_DOC_TYPES: String(process.env.FBS_DOC_TYPES || '').trim() ? 'definida' : 'ausente — vale o padrao (so o tipo 4, venda)' };
   if (String(loja.fbs || 'auto') === 'nao') {
-    return { ok: true, versao: 'sonda-tipos v1', loja: loja.key, sem_full: true, motivo: 'esta empresa não usa Shopee Full (declarado em ' + (loja.prefixo || '') + '_FBS=0)', rotina_hoje: rotinaHoje };
+    return { ok: true, versao: 'sonda-tipos v2', loja: loja.key, sem_full: true, motivo: 'esta empresa não usa Shopee Full (declarado em ' + (loja.prefixo || '') + '_FBS=0)', rotina_hoje: rotinaHoje };
   }
-  const t = lerTipos(opts.tipos); if (!t.ok) return t;
+  /* Codex #32 (a classe): parametro de UM valor que vem repetido na URL chega como lista. Juntar com virgula dava
+     motivo torto (data "invalida") ou busca que nao acha nada sem avisar. Recusa dizendo qual — menos o &tarefas=,
+     onde vale o ultimo (ver lerTarefas), e o &tipos=, que e lista mesmo. */
+  for (const nome of ['de', 'ate', 'dias', 'busca', 'limite']) {
+    if (Array.isArray(opts[nome])) return invalido('parametro repetido na URL: &' + nome + '= aparece ' + opts[nome].length + ' vezes (deixe um so)');
+  }
+  // retomada: confere tarefas ja pedidas (sem pedir de novo) — os tipos e a janela sao os do pedido original
+  const tarefasBrutas = Array.isArray(opts.tarefas) ? opts.tarefas.filter((x) => x != null && String(x).trim() !== '') : opts.tarefas;
+  const retomada = Array.isArray(tarefasBrutas) ? tarefasBrutas.length > 0 : (tarefasBrutas != null && String(tarefasBrutas).trim() !== '');
+  let t = null, jan = null, tar = null;
+  if (retomada) { tar = lerTarefas(opts.tarefas); if (!tar.ok) return tar; }
+  else { t = lerTipos(opts.tipos); if (!t.ok) return t; }
   const lim = lerLimite(opts.limite); if (!lim.ok) return lim;
-  const jan = janela(opts, io.hoje()); if (!jan.ok) return jan;
+  if (!retomada) { jan = janela(opts, io.hoje()); if (!jan.ok) return jan; }
 
   if (EM_ANDAMENTO.has(loja.key)) return { ok: false, ja_em_andamento: true, erro: 'ja ha uma sonda desta loja em andamento — espere ela terminar (leva de 30 s a 2 min)' };
   EM_ANDAMENTO.add(loja.key);
   try {
     // etapa 1: uma tarefa por tipo; recusa de um tipo não derruba os outros
     const porTipo = new Map();
-    for (const tipo of t.tipos) {
-      const reg = { tipo, nome_no_sdk: NOME_NO_SDK[tipo] || null, ids: [], recusa: null };
-      try { reg.ids = Array.from(new Set((await io.gerar(loja, jan.start, jan.end, tipo, 1, 1)).map(Number))); }
-      catch (e) { reg.recusa = String(e.message || e).slice(0, 300); }
-      porTipo.set(tipo, reg);
+    if (retomada) {
+      for (const [tipo, ids] of tar.porTipo) porTipo.set(tipo, { tipo, nome_no_sdk: NOME_NO_SDK[tipo] || null, ids: ids.slice(), recusa: null });
+    } else {
+      for (const tipo of t.tipos) {
+        const reg = { tipo, nome_no_sdk: NOME_NO_SDK[tipo] || null, ids: [], recusa: null };
+        try { reg.ids = Array.from(new Set((await io.gerar(loja, jan.start, jan.end, tipo, 1, 1)).map(Number))); }
+        catch (e) { reg.recusa = String(e.message || e).slice(0, 300); }
+        porTipo.set(tipo, reg);
+      }
     }
     const todos = []; for (const reg of porTipo.values()) for (const id of reg.ids) if (!todos.includes(id)) todos.push(id);
 
@@ -214,15 +285,27 @@ async function sondarTipos(loja, opts = {}) {
     const processando = new Set((st.aindaProcessando || []).map(Number));
     const baixados = new Map(); for (const b of bufs) baixados.set(Number(b.request_id), b);
 
+    // v2: de toda tarefa que nao terminou baixada, o que a Shopee diz dela (cru). Falhar aqui nao derruba a sonda.
+    const semArquivo = todos.filter((id) => !baixados.has(id));
+    const cruPorId = new Map(); let cruIndisponivel = null; let cruConsultado = false;
+    if (semArquivo.length) {
+      cruConsultado = true;
+      try { for (const item of (await io.situacao(loja, semArquivo)) || []) if (item && item.request_id != null) cruPorId.set(Number(item.request_id), soCamposSimples(item)); }
+      catch (e) { cruIndisponivel = String(e.message || e).slice(0, 200); }
+    }
+
     let imp = { saida: [], entrada: [] };
     try { const lido = io.importadas(loja.key); imp = { saida: lido.saida || [], entrada: lido.entrada || [] }; } catch (e) { /* sem registro de importadas: a coluna sai como desconhecida */ imp = null; }
     const jaSaida = imp ? new Set(imp.saida) : null, jaEntrada = imp ? new Set(imp.entrada) : null;
 
     const out = {
-      ok: true, versao: 'sonda-tipos v1', loja: loja.key, so_leitura: true,
-      periodo: { de: rotulo(jan.start), ate: rotulo(jan.end), dias: jan.dias },
+      ok: true, versao: 'sonda-tipos v2', loja: loja.key, so_leitura: true,
+      retomada,                                // true = so conferiu tarefas de um pedido anterior (nada novo foi pedido a Shopee)
+      periodo: jan ? { de: rotulo(jan.start), ate: rotulo(jan.end), dias: jan.dias } : null,   // na retomada vale o do pedido original
       rotina_hoje: rotinaHoje,
       completo: true,
+      continuar: null,
+      situacao_crua_indisponivel: cruIndisponivel,
       tipos: [],
       busca: null,
       como_ler: 'Cada tipo traz o RESUMO do que veio (sentido, finalidade, natureza, serie, CFOP). Devolucao de cliente e nota de ENTRADA (tpNF 0) com finNFe 4 e uma NF de venda referenciada. Tipo com completo:false nao foi lido ate o fim — isso nao quer dizer que nao ha documento.',
@@ -258,6 +341,13 @@ async function sondarTipos(loja, opts = {}) {
         tipo: reg.tipo, nome_no_sdk: reg.nome_no_sdk,
         completo, incompleto_por: completo ? null : motivos,
         tarefas: reg.ids.length,
+        tarefas_sem_arquivo: reg.ids.filter((id) => !baixados.has(id)).map((id) => ({
+          request_id: id,
+          situacao: processando.has(id) ? 'processando' : (prontos.has(id) ? 'pronta_mas_nao_baixou' : ((st.erros || []).some((e) => Number(e.request_id) === id) ? 'erro' : 'sem_resposta')),
+          o_que_a_shopee_diz: cruPorId.has(id) ? cruPorId.get(id) : null,
+          // por que o campo acima esta vazio, quando esta: a consulta falhou (ver situacao_crua_indisponivel) ou a Shopee respondeu sem esta tarefa
+          consulta: cruPorId.has(id) ? 'respondeu' : (cruIndisponivel || !cruConsultado ? 'falhou' : 'respondeu_sem_esta_tarefa'),
+        })),
         sem_tarefa: reg.ids.length === 0 && !reg.recusa,     // a Shopee não gerou nada: período sem documento desse tipo (ou tipo que a conta não tem)
         notas: lidas.notas.length,
         entrada_de_devolucao_com_nf_referenciada: lidas.notas.filter((n) => n.tpNF === '0' && n.finNFe === '4' && n.referencia.length > 0).length,
@@ -265,6 +355,9 @@ async function sondarTipos(loja, opts = {}) {
         lista,
       });
     }
+    const pendentes = [];
+    for (const reg of porTipo.values()) for (const id of reg.ids) if (processando.has(id)) pendentes.push(reg.tipo + ':' + id);
+    if (pendentes.length) out.continuar = { tarefas_processando: pendentes.length, acrescente_na_url: '&tarefas=' + pendentes.join(','), como: 'espere um minuto e abra a MESMA URL com isto no fim (se ela ja tiver um &tarefas=, pode deixar: vale o ultimo). A sonda nao pede nada de novo a Shopee, so confere e baixa o que ficou pronto' };
     out.notas_fora_da_lista = omitidas;      // o resumo e a busca contam todas; só a `lista` tem teto (&limite=)
     const b = opts.busca == null ? '' : String(opts.busca).trim();
     if (b) out.busca = { procurei: b.slice(0, 60), como: 'pedido do item (xPed), numero da nota ou numero/chave da NF referenciada', achei: achados.length, notas: achados, atencao: out.completo ? null : 'leitura incompleta: nao achar aqui NAO prova que a nota nao existe' };
@@ -274,4 +367,4 @@ async function sondarTipos(loja, opts = {}) {
   }
 }
 
-module.exports = { sondarTipos, lerNota, janela, lerTipos, bateComABusca, MAX_DIAS, TIPOS_PADRAO };
+module.exports = { sondarTipos, lerNota, janela, lerTipos, lerTarefas, soCamposSimples, bateComABusca, MAX_DIAS, TIPOS_PADRAO, MAX_TAREFAS };

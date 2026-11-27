@@ -15,6 +15,9 @@
 //  - pedido fora do aceito (data, janela, tipo, limite) e recusado dizendo por que, sem falar com a Shopee;
 //  - mostra o que a rotina pede hoje (o valor em vigor de FBS_DOC_TYPES);
 //  - uma sonda por loja de cada vez; empresa sem Full sai limpa sem tocar na Shopee.
+// v2 (depois da 1a rodada em producao: tipos 2 e 5 "FAILED" sem motivo, tipos 3 e 6 processando apos 2 min):
+//  - toda tarefa que nao terminou baixada sai com o que a Shopee diz dela, CRU (campos simples, link nenhum);
+//  - `continuar` traz as tarefas processando prontas pra URL; a retomada (&tarefas=) nao pede nada de novo.
 
 'use strict';
 const fs = require('fs'); const os = require('os'); const path = require('path');
@@ -22,7 +25,7 @@ process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'fbs-sonda-tipos-')
 delete process.env.FBS_DOC_TYPES;
 const AdmZip = require('adm-zip');
 const fbsNf = require('../modules/fbs-nf');
-const { sondarTipos, lerNota, MAX_DIAS, TIPOS_PADRAO } = require('../modules/fbs-sonda-tipos');
+const { sondarTipos, lerNota, MAX_DIAS, TIPOS_PADRAO, MAX_TAREFAS } = require('../modules/fbs-sonda-tipos');
 
 let falhas = 0;
 const ok = (c, o) => { if (!c) falhas++; console.log((c ? 'ok    ' : 'FALHA ') + o); };
@@ -54,9 +57,9 @@ const SAIDA_DEV_COM_REF = xml({ serie: 5, numero: 7004, tpNF: 1, finNFe: 4, natO
 
 /* Shopee de mentira: por tipo, diz o que acontece. Guarda as chamadas pra conferir o que foi pedido. */
 function shopee(porTipo, extra) {
-  const cham = { gerar: [], aguardar: [], baixar: [] };
+  const cham = { gerar: [], aguardar: [], baixar: [], situacao: [] };
   const idsDoTipo = (t) => (porTipo[t] && porTipo[t].zips ? porTipo[t].zips.map((_, i) => t * 100 + i) : []);
-  const zipDoId = (id) => { const t = Math.floor(id / 100); return porTipo[t].zips[id % 100]; };
+  const zipDoId = (id) => { const p = porTipo[Math.floor(id / 100)]; return p && p.zips ? (p.zips[id % 100] || null) : null; };   // tarefa que o teste nao previu: sem arquivo
   const io = {
     hoje: () => HOJE,
     importadas: () => (extra && extra.importadas) || { quando: null, saida: [], entrada: [] },
@@ -74,7 +77,17 @@ function shopee(porTipo, extra) {
     },
     baixar: async (loja, ids) => {
       cham.baixar.push(ids.slice());
-      return ids.filter((id) => !(porTipo[Math.floor(id / 100)] || {}).downloadFalha).map((id) => ({ request_id: id, buf: zipDoId(id) }));
+      return ids.filter((id) => !(porTipo[Math.floor(id / 100)] || {}).downloadFalha && zipDoId(id)).map((id) => ({ request_id: id, buf: zipDoId(id) }));
+    },
+    // o que a Shopee devolve sobre cada tarefa (o teste NUNCA fala com a Shopee de verdade)
+    situacao: async (loja, ids) => {
+      cham.situacao.push(ids.slice());
+      if (extra && extra.situacaoFalha) throw new Error('rede caiu na consulta da situacao');
+      return ids.map((id) => {
+        const p = porTipo[Math.floor(id / 100)] || {};
+        return { request_id: id, status: p.processando ? 'PROCESSING' : (p.erroTarefa ? 'FAILED' : 'AVAILABLE'), error_message: p.erroTarefa ? (p.motivo || 'no invoice found in this period') : '',
+          file_link: 'https://cdn.exemplo/arquivo.zip?assinatura=SEGREDO', tentativas: 3, pronto: false, aninhado: { nao: 'entra' }, lista: [1, 2] };
+      });
     },
   };
   return { io, cham };
@@ -190,6 +203,91 @@ const DISCO_ANTES = arquivosEmDisco();   // o que os modulos criam ao carregar n
 
   ok(arquivosEmDisco() === DISCO_ANTES, '⚠️ SO LEITURA, depois de todas as sondas (inclusive as incompletas e a que estourou): o disco segue igual');
 
+  // ── 10) v2: a tarefa que nao terminou baixada sai com o que a Shopee diz dela, CRU ──
+  s = shopee({ 2: { zips: [zip([DEVOLUCAO])], erroTarefa: true, motivo: 'x'.repeat(400) }, 3: { zips: [zip([SIMBOLICA])], processando: true }, 5: { zips: [zip([DEVOLUCAO2])], downloadFalha: true }, 6: { zips: [zip([SIMBOLICA])] } });
+  r = await sondarTipos(LOJA, { dias: '30', io: s.io });
+  const sa = (t) => doTipo(r, t).tarefas_sem_arquivo;
+  ok(sa(2).length === 1 && sa(2)[0].request_id === 200 && sa(2)[0].situacao === 'erro' && sa(2)[0].o_que_a_shopee_diz.status === 'FAILED' && sa(2)[0].o_que_a_shopee_diz.tentativas === 3 && sa(2)[0].o_que_a_shopee_diz.pronto === false, '⚠️ v2: tarefa com erro traz o que a Shopee disse dela, cru (status, e os campos simples)');
+  ok(sa(2)[0].o_que_a_shopee_diz.error_message.length === 300 && !('aninhado' in sa(2)[0].o_que_a_shopee_diz) && !('lista' in sa(2)[0].o_que_a_shopee_diz), '  v2: texto cortado em 300 e nada aninhado (so campos simples)');
+  ok(sa(2)[0].o_que_a_shopee_diz.file_link === '(link omitido)' && !/SEGREDO|cdn\.exemplo/.test(JSON.stringify(r)), '⚠️ v2: link nenhum na resposta (o de download e assinado)');
+  ok(sa(3)[0].situacao === 'processando' && sa(3)[0].o_que_a_shopee_diz.status === 'PROCESSING' && sa(5)[0].situacao === 'pronta_mas_nao_baixou' && sa(6).length === 0, '  v2: cada situacao com o seu nome (processando, pronta_mas_nao_baixou); a que baixou nao aparece');
+  ok(s.cham.situacao.length === 1 && s.cham.situacao[0].join() === '200,300,500', '⚠️ v2: UMA consulta crua, so das tarefas que nao terminaram baixadas (200,300,500 — a 600 baixou)');
+  ok(r.continuar && r.continuar.tarefas_processando === 1 && r.continuar.acrescente_na_url === '&tarefas=3:300' && r.retomada === false && r.versao === 'sonda-tipos v2', '⚠️ v2: `continuar` traz so as que estao PROCESSANDO, prontas pra URL (&tarefas=3:300)');
+  s = shopee({ 2: { zips: [zip([DEVOLUCAO])] } });
+  r = await sondarTipos(LOJA, { tipos: '2', io: s.io });
+  ok(s.cham.situacao.length === 0 && r.continuar === null && r.situacao_crua_indisponivel === null && doTipo(r, 2).tarefas_sem_arquivo.length === 0, '  v2: tudo baixado — nenhuma consulta crua e nada a continuar');
+  s = shopee({ 2: { zips: [zip([DEVOLUCAO])], erroTarefa: true } }, { situacaoFalha: true });
+  try { r = await sondarTipos(LOJA, { tipos: '2', io: s.io }); } catch (e) { r = { ok: false, estourou: e.message, tipos: [{ tipo: 2, tarefas_sem_arquivo: [{}], incompleto_por: [] }] }; }
+  ok(r.ok === true && /rede caiu/.test(r.situacao_crua_indisponivel) && doTipo(r, 2).tarefas_sem_arquivo[0].o_que_a_shopee_diz === null && doTipo(r, 2).completo === false && /com erro na Shopee/.test(doTipo(r, 2).incompleto_por.join()), '⚠️ v2: a consulta crua falhou — a sonda responde assim mesmo, diz que nao conseguiu e o tipo segue INCOMPLETO');
+
+  // ── 11) v2: retomada — confere as tarefas que ficaram processando SEM pedir de novo ──
+  s = shopee({ 3: { zips: [zip([SIMBOLICA, ENTRADA_COM_REF])] }, 6: { zips: [zip([DEV_SEM_REF])], processando: true } });
+  r = await sondarTipos(LOJA, { tarefas: '3:300, 6:600', busca: '444', tipos: '9', de: 'ontem', io: s.io });
+  ok(r.ok === true && r.retomada === true && r.periodo === null && s.cham.gerar.length === 0 && s.cham.aguardar.length === 1 && s.cham.aguardar[0].join() === '300,600', '⚠️ v2: &tarefas= NAO pede nada novo a Shopee (0 pedidos), so confere as tarefas dadas — e ignora tipos/datas da URL');
+  ok(doTipo(r, 3).notas === 2 && doTipo(r, 3).completo === true && doTipo(r, 6).completo === false && r.tipos.length === 2 && r.busca.achei === 1 && r.busca.notas[0].tipo === 3, '⚠️ v2: na retomada as notas voltam no tipo certo e a busca funciona igual');
+  ok(r.continuar && r.continuar.acrescente_na_url === '&tarefas=6:600', '  v2: o que ainda processa volta em `continuar` (da pra retomar de novo)');
+  for (const [nome, bruto, re] of [
+    ['texto solto', 'abc', /tarefa invalida/], ['tipo 7', '7:1', /tarefa invalida/], ['sem numero', '3:', /tarefa invalida/], ['numero com letra', '3:12a', /tarefa invalida/],
+    ['numero de 16 digitos', '3:1234567890123456', /tarefa invalida/], ['negativo', '3:-5', /tarefa invalida/], ['repetida', '3:300,6:300', /tarefa repetida/], ['so virgulas', ' , ,', /nenhuma tarefa/],
+    ['acima do teto', Array.from({ length: MAX_TAREFAS + 1 }, (_, i) => '3:' + (i + 1)).join(','), /tarefas demais/],
+  ]) {
+    s = shopee({ 3: { zips: [zip([SIMBOLICA])] } });
+    r = await sondarTipos(LOJA, { tarefas: bruto, io: s.io });
+    ok(r.ok === false && r.pedido_invalido === true && re.test(r.erro) && s.cham.gerar.length === 0 && s.cham.aguardar.length === 0, '  &tarefas= ' + nome + ': recusado ("' + String(r.erro).slice(0, 45) + '") sem chamar a Shopee');
+  }
+  s = shopee({ 3: { zips: [zip([SIMBOLICA])] } });
+  r = await sondarTipos(LOJA, { tarefas: Array.from({ length: MAX_TAREFAS }, (_, i) => '3:' + (300 + i)).join(','), io: Object.assign(s.io, { aguardar: async (loja, ids) => ({ prontos: [], erros: [], aindaProcessando: ids }), baixar: async () => [] }) });
+  ok(r.ok === true && doTipo(r, 3).tarefas === MAX_TAREFAS && r.continuar.tarefas_processando === MAX_TAREFAS, '  &tarefas= exatamente no teto (' + MAX_TAREFAS + ') passa');
+  // ── 12) v2: sem nada injetado, a consulta crua usa o MESMO endpoint e o mesmo formato da espera do motor ──
+  {
+    const apiShopee = require('../modules/shopee-api');
+    const original = apiShopee.shopeeApiCall; const pedidos = [];
+    apiShopee.shopeeApiCall = async (loja, caminho, metodo, corpo, query) => { pedidos.push({ loja: loja.key, caminho, metodo, corpo, query }); return { ok: true, data: { result_list: [{ request_id: 200, status: 'FAILED', fail_reason: 'motivo que a Shopee deu' }] } }; };
+    try {
+      s = shopee({ 2: { zips: [zip([DEVOLUCAO])], erroTarefa: true } });
+      delete s.io.situacao;   // vale a de producao
+      r = await sondarTipos(LOJA, { tipos: '2', io: s.io });
+    } finally { apiShopee.shopeeApiCall = original; }
+    ok(pedidos.length === 1 && pedidos[0].caminho === '/api/v2/order/get_fbs_invoices_result' && pedidos[0].metodo === 'POST' && JSON.stringify(pedidos[0].corpo) === '{"request_id_list":{"request_id":[200]}}' && pedidos[0].loja === 'amb', '⚠️ v2: a consulta crua de producao pergunta a situacao no endpoint do motor, com as tarefas no formato dele');
+    ok(doTipo(r, 2).tarefas_sem_arquivo[0].o_que_a_shopee_diz.fail_reason === 'motivo que a Shopee deu', '⚠️ v2: o campo que a Shopee mandar (qualquer nome) aparece — e assim que se le o motivo do FAILED');
+  }
+  // ── 13) Codex #32: a SEGUNDA retomada (a URL ja tem um &tarefas= e ganha outro no fim) e os parametros repetidos ──
+  s = shopee({ 3: { zips: [zip([SIMBOLICA])] }, 6: { zips: [zip([DEV_SEM_REF])], processando: true } });
+  r = await sondarTipos(LOJA, { tarefas: ['3:300,6:600', '6:600'], io: s.io });
+  ok(r.ok === true && r.retomada === true && s.cham.aguardar[0].join() === '600' && r.tipos.length === 1 && r.tipos[0].tipo === 6 && r.continuar.acrescente_na_url === '&tarefas=6:600', '⚠️ Codex #32: dois &tarefas= na URL (2a retomada) — vale o ULTIMO; nao junta os dois nem acusa "repetida"');
+  r = await sondarTipos(LOJA, { tarefas: ['6:600', '', '  '], io: shopee({ 6: { zips: [zip([DEV_SEM_REF])] } }).io });
+  ok(r.ok === true && r.retomada === true && doTipo(r, 6).notas === 1, '  &tarefas= repetido com o ultimo vazio: vale o ultimo que tem valor');
+  s = shopee({ 2: { zips: [zip([DEVOLUCAO])] } });
+  r = await sondarTipos(LOJA, { tarefas: ['', ''], tipos: '2', io: s.io });
+  ok(r.ok === true && r.retomada === false && s.cham.gerar.length === 1, '  &tarefas= repetido e todo vazio: nao e retomada (segue o pedido normal)');
+  for (const nome of ['de', 'ate', 'dias', 'busca', 'limite']) {
+    s = shopee({ 2: { zips: [zip([DEVOLUCAO])] } });
+    r = await sondarTipos(LOJA, Object.assign({ tipos: '2', io: s.io }, { [nome]: ['1', '2'] }));
+    ok(r.ok === false && r.pedido_invalido === true && new RegExp('parametro repetido na URL: &' + nome + '= aparece 2 vezes').test(r.erro) && s.cham.gerar.length === 0, '⚠️ Codex #32: &' + nome + '= repetido na URL: recusado dizendo qual, sem chamar a Shopee');
+  }
+  s = shopee({ 3: { zips: [zip([SIMBOLICA])], processando: true } });
+  r = await sondarTipos(LOJA, { tarefas: '3:300', busca: ['a', 'b'], io: s.io });
+  ok(r.ok === false && /&busca= aparece 2 vezes/.test(r.erro) && s.cham.aguardar.length === 0, '  o parametro repetido e recusado tambem na retomada');
+  // a consulta crua: recusa da Shopee nao vira "lista vazia", e tarefa que a resposta nao trouxe fica dita
+  {
+    const apiShopee = require('../modules/shopee-api');
+    const original = apiShopee.shopeeApiCall;
+    const comResposta = async (resposta) => {
+      apiShopee.shopeeApiCall = async () => resposta;
+      try { const f = shopee({ 2: { zips: [zip([DEVOLUCAO])], erroTarefa: true } }); delete f.io.situacao; return await sondarTipos(LOJA, { tipos: '2', io: f.io }); }
+      finally { apiShopee.shopeeApiCall = original; }
+    };
+    r = await comResposta({ ok: false, data: { error: 'error_auth', message: 'Invalid access_token' } });
+    ok(r.ok === true && /get_fbs_invoices_result erro: "error_auth"/.test(r.situacao_crua_indisponivel) && doTipo(r, 2).tarefas_sem_arquivo[0].consulta === 'falhou' && doTipo(r, 2).tarefas_sem_arquivo[0].o_que_a_shopee_diz === null, '⚠️ Codex #32: a Shopee RECUSA a consulta crua (ok:false) — a resposta diz que falhou e por que (antes: vazio e calado)');
+    r = await comResposta({ ok: true, data: { error: 'error_param', result_list: [] } });
+    ok(/get_fbs_invoices_result erro: "error_param"/.test(String(r.situacao_crua_indisponivel)) && doTipo(r, 2).tarefas_sem_arquivo[0].consulta === 'falhou', '  ... idem quando vem ok:true com `error` no corpo');
+    r = await comResposta({ ok: true, data: { result_list: [{ request_id: 999, status: 'AVAILABLE' }] } });
+    ok(r.situacao_crua_indisponivel === null && doTipo(r, 2).tarefas_sem_arquivo[0].consulta === 'respondeu_sem_esta_tarefa' && doTipo(r, 2).tarefas_sem_arquivo[0].o_que_a_shopee_diz === null, '⚠️ Codex #32: a consulta respondeu mas SEM esta tarefa — fica dito (nao se confunde com consulta que falhou)');
+    r = await comResposta({ ok: true, data: { result_list: [{ request_id: 200, status: 'FAILED' }] } });
+    ok(doTipo(r, 2).tarefas_sem_arquivo[0].consulta === 'respondeu' && doTipo(r, 2).tarefas_sem_arquivo[0].o_que_a_shopee_diz.status === 'FAILED', '  ... e quando traz a tarefa: "respondeu", com o que veio');
+  }
+  ok(arquivosEmDisco() === DISCO_ANTES, '⚠️ SO LEITURA tambem na v2: o disco segue igual');
+
   // ── 7) a leitura da nota, sozinha ──
   const semIde = lerNota(Buffer.from('<nfeProc><NFe><infNFe Id="NFe' + chave(3, 42) + '"></infNFe></NFe></nfeProc>'), 'x.xml');
   ok(semIde.chave === chave(3, 42) && semIde.serie === '3' && semIde.numero === '42' && semIde.tpNF === null && semIde.finNFe === null && semIde.referencia.length === 0 && semIde.cfops.length === 0, '  XML sem identificacao: serie e numero saem da chave, e o que nao ha fica nulo (nao inventa)');
@@ -228,9 +326,13 @@ const DISCO_ANTES = arquivosEmDisco();   // o que os modulos criam ao carregar n
       x = await pede('/amb/fbs/sonda-tipos?k=' + CHAVE + '&tipos=2&tipos=9');
       ok(x.status === 400 && /tipo de documento invalido/.test((x.j && x.j.erro) || ''), '  parametro repetido na URL (&tipos=2&tipos=9): 400, nao erro interno');
       x = await pede('/amb/fbs/sonda-tipos?k=' + CHAVE + '&de=2026-11-01&de=2026-11-02');
-      ok(x.status === 400 && /data inicial invalida/.test((x.j && x.j.erro) || ''), '  data repetida na URL: 400, nao erro interno');
+      ok(x.status === 400 && /parametro repetido na URL: &de= aparece 2 vezes/.test((x.j && x.j.erro) || ''), '⚠️ Codex #32: data repetida na URL: 400 dizendo QUAL parametro repetiu (dizia "data invalida")');
+      x = await pede('/amb/fbs/sonda-tipos?k=' + CHAVE + '&tarefas=3:300&tarefas=3:abc');
+      ok(x.status === 400 && /tarefa invalida em &tarefas=: "3:abc"/.test((x.j && x.j.erro) || ''), '⚠️ Codex #32: &tarefas= duas vezes na URL — vale o ULTIMO (o erro e o do segundo)');
       x = await pede('/good/fbs/sonda-tipos?k=' + CHAVE);
-      ok(x.status === 200 && x.j && x.j.ok === true && x.j.sem_full === true && x.j.versao === 'sonda-tipos v1' && Array.isArray(x.j.rotina_hoje.tipos_pedidos), '⚠️ rota no ar, empresa sem Full: 200 "sem_full" e o que a rotina pede hoje (status ' + x.status + ')');
+      ok(x.status === 200 && x.j && x.j.ok === true && x.j.sem_full === true && x.j.versao === 'sonda-tipos v2' && Array.isArray(x.j.rotina_hoje.tipos_pedidos), '⚠️ rota no ar, empresa sem Full: 200 "sem_full" e o que a rotina pede hoje (status ' + x.status + ')');
+      x = await pede('/amb/fbs/sonda-tipos?k=' + CHAVE + '&tarefas=3:abc');
+      ok(x.status === 400 && x.j && x.j.pedido_invalido === true && /tarefa invalida/.test(x.j.erro), '⚠️ rota no ar, &tarefas= malformado: 400 com o motivo (status ' + x.status + ')');
       x = await pede('/lojaquenaoexiste/fbs/sonda-tipos?k=' + CHAVE);
       ok(x.status === 404, '  loja desconhecida: 404');
     }

@@ -232,10 +232,11 @@ app.get('/:loja/fbs/raio-x', resolverLoja, async (req, res) => {
 // documentos, abre os XMLs em memória e devolve o resumo por tipo; não grava ZIP, não marca importada,
 // não toca no Bling. Leva de 30 s a 2 min (a tarefa da Shopee demora a ficar pronta).
 // Uso: GET /:loja/fbs/sonda-tipos?k=ADMIN_KEY[&tipos=2,3,5,6][&de=AAAA-MM-DD&ate=AAAA-MM-DD | &dias=30][&busca=<pedido ou nº da NF de venda>][&limite=200]
+// Tarefa que ficou processando: a resposta traz `continuar` — abrir a mesma URL com &tarefas=tipo:numero,... só confere e baixa (não pede de novo).
 app.get('/:loja/fbs/sonda-tipos', resolverLoja, async (req, res) => {
   if (!fbsAuthOk(req)) return res.status(401).json({ ok: false, erro: 'chave invalida' });
   try {
-    const r = await fbsSondaTipos.sondarTipos(req.loja, { tipos: req.query.tipos, dias: req.query.dias, de: req.query.de, ate: req.query.ate, busca: req.query.busca, limite: req.query.limite });
+    const r = await fbsSondaTipos.sondarTipos(req.loja, { tipos: req.query.tipos, dias: req.query.dias, de: req.query.de, ate: req.query.ate, busca: req.query.busca, limite: req.query.limite, tarefas: req.query.tarefas });
     res.status(r.pedido_invalido ? 400 : (r.ja_em_andamento ? 409 : 200)).json(r);
   } catch (e) { res.status(500).json({ ok: false, erro: String(e.message || e) }); }
 });
