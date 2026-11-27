@@ -746,5 +746,7 @@ module.exports = {
   NF_DIR, rotina, estadoAtual, marcarImportadas, chavesDoZip, caminhoZip, limpar,
   lerImportadas, nfEmitente, nfChave, ymdSP,
   // expostos p/ teste
-  separarXmls, fbsGerar, fbsAguardar, fbsBaixar
+  separarXmls, fbsGerar, fbsAguardar, fbsBaixar,
+  // 27/11: a sonda dos tipos (fbs-sonda-tipos.js) mostra o que a rotina pede HOJE — a mesma leitura da env, sem copia
+  tiposDoc
 };

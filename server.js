@@ -19,6 +19,7 @@ const log = require('./modules/supabase-log');
 const { getConfigLoja, lojasValidas, lojasConfiguradas, SHOPEE_BASE } = require('./modules/lojas');
 const fbsNf = require('./modules/fbs-nf');
 const fbsRaioX = require('./modules/fbs-raio-x');
+const fbsSondaTipos = require('./modules/fbs-sonda-tipos');
 
 const app = express();
 
@@ -223,6 +224,19 @@ app.get('/:loja/fbs/raio-x', resolverLoja, async (req, res) => {
   try {
     const r = await fbsRaioX.raioX(req.loja, { tipo: String(req.query.tipo || 'saida'), limite: req.query.limite, pular: req.query.pular, tudo: req.query.tudo });
     res.json(r);
+  } catch (e) { res.status(500).json({ ok: false, erro: String(e.message || e) }); }
+});
+
+// SONDA DOS TIPOS (27/11): o que a Shopee tem no Full ALÉM da venda — a rotina só pede os tipos de
+// FBS_DOC_TYPES (padrão: 4, venda) e a NF de devolução do cliente não chega ao Bling. Só leitura: pede os
+// documentos, abre os XMLs em memória e devolve o resumo por tipo; não grava ZIP, não marca importada,
+// não toca no Bling. Leva de 30 s a 2 min (a tarefa da Shopee demora a ficar pronta).
+// Uso: GET /:loja/fbs/sonda-tipos?k=ADMIN_KEY[&tipos=2,3,5,6][&de=AAAA-MM-DD&ate=AAAA-MM-DD | &dias=30][&busca=<pedido ou nº da NF de venda>][&limite=200]
+app.get('/:loja/fbs/sonda-tipos', resolverLoja, async (req, res) => {
+  if (!fbsAuthOk(req)) return res.status(401).json({ ok: false, erro: 'chave invalida' });
+  try {
+    const r = await fbsSondaTipos.sondarTipos(req.loja, { tipos: req.query.tipos, dias: req.query.dias, de: req.query.de, ate: req.query.ate, busca: req.query.busca, limite: req.query.limite });
+    res.status(r.pedido_invalido ? 400 : (r.ja_em_andamento ? 409 : 200)).json(r);
   } catch (e) { res.status(500).json({ ok: false, erro: String(e.message || e) }); }
 });
 
