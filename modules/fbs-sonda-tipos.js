@@ -111,6 +111,10 @@ function lerTipos(bruto) {
 /* &tarefas=3:111,6:222 — as tarefas de uma sonda anterior que ficaram processando (o campo `continuar`
    da resposta traz isto pronto). Numero de ate 15 digitos: acima disso o JavaScript ja nao guarda inteiro exato. */
 function lerTarefas(bruto) {
+  /* Codex #32: na 2a retomada a URL ja tem um &tarefas= e o `continuar` manda acrescentar outro no fim — o Express
+     entrega os dois numa lista. Vale o ULTIMO (o mais novo, o que acabou de ser colado); juntar os dois repetia a
+     tarefa e a retomada morria em 400 "tarefa repetida" justamente quando a tarefa era lenta. */
+  if (Array.isArray(bruto)) { const validos = bruto.filter((x) => x != null && String(x).trim() !== ''); bruto = validos.length ? validos[validos.length - 1] : ''; }
   const partes = String(bruto).split(',').map((x) => x.trim()).filter((x) => x !== '');
   if (!partes.length) return invalido('nenhuma tarefa informada em &tarefas=');
   if (partes.length > MAX_TAREFAS) return invalido('tarefas demais em &tarefas= (o teto e ' + MAX_TAREFAS + ' por chamada)');
@@ -140,8 +144,11 @@ function soCamposSimples(item) {
 }
 
 // a situacao das tarefas, como a Shopee devolve (o fbsAguardar do motor so guarda pronto/erro/processando)
+/* Codex #32: o shopeeApiCall NAO joga erro quando a Shopee recusa — devolve { ok:false, data:{ error } }. Sem olhar
+   isso, a recusa virava "lista vazia": a resposta saia sem o que a Shopee disse E sem dizer que a consulta falhou. */
 async function situacaoCrua(loja, ids) {
-  const { data } = await shopee.shopeeApiCall(loja, '/api/v2/order/get_fbs_invoices_result', 'POST', { request_id_list: { request_id: ids.map(Number) } }, null);
+  const { ok, data } = await shopee.shopeeApiCall(loja, '/api/v2/order/get_fbs_invoices_result', 'POST', { request_id_list: { request_id: ids.map(Number) } }, null);
+  if (!ok || (data && data.error)) throw new Error('get_fbs_invoices_result erro: ' + String(JSON.stringify(data && (data.error || data.message || data)) || 'sem corpo').slice(0, 160));
   return (data && data.result_list) || [];
 }
 
@@ -235,8 +242,15 @@ async function sondarTipos(loja, opts = {}) {
   if (String(loja.fbs || 'auto') === 'nao') {
     return { ok: true, versao: 'sonda-tipos v2', loja: loja.key, sem_full: true, motivo: 'esta empresa não usa Shopee Full (declarado em ' + (loja.prefixo || '') + '_FBS=0)', rotina_hoje: rotinaHoje };
   }
+  /* Codex #32 (a classe): parametro de UM valor que vem repetido na URL chega como lista. Juntar com virgula dava
+     motivo torto (data "invalida") ou busca que nao acha nada sem avisar. Recusa dizendo qual — menos o &tarefas=,
+     onde vale o ultimo (ver lerTarefas), e o &tipos=, que e lista mesmo. */
+  for (const nome of ['de', 'ate', 'dias', 'busca', 'limite']) {
+    if (Array.isArray(opts[nome])) return invalido('parametro repetido na URL: &' + nome + '= aparece ' + opts[nome].length + ' vezes (deixe um so)');
+  }
   // retomada: confere tarefas ja pedidas (sem pedir de novo) — os tipos e a janela sao os do pedido original
-  const retomada = opts.tarefas != null && String(opts.tarefas).trim() !== '';
+  const tarefasBrutas = Array.isArray(opts.tarefas) ? opts.tarefas.filter((x) => x != null && String(x).trim() !== '') : opts.tarefas;
+  const retomada = Array.isArray(tarefasBrutas) ? tarefasBrutas.length > 0 : (tarefasBrutas != null && String(tarefasBrutas).trim() !== '');
   let t = null, jan = null, tar = null;
   if (retomada) { tar = lerTarefas(opts.tarefas); if (!tar.ok) return tar; }
   else { t = lerTipos(opts.tipos); if (!t.ok) return t; }
@@ -273,8 +287,9 @@ async function sondarTipos(loja, opts = {}) {
 
     // v2: de toda tarefa que nao terminou baixada, o que a Shopee diz dela (cru). Falhar aqui nao derruba a sonda.
     const semArquivo = todos.filter((id) => !baixados.has(id));
-    const cruPorId = new Map(); let cruIndisponivel = null;
+    const cruPorId = new Map(); let cruIndisponivel = null; let cruConsultado = false;
     if (semArquivo.length) {
+      cruConsultado = true;
       try { for (const item of (await io.situacao(loja, semArquivo)) || []) if (item && item.request_id != null) cruPorId.set(Number(item.request_id), soCamposSimples(item)); }
       catch (e) { cruIndisponivel = String(e.message || e).slice(0, 200); }
     }
@@ -330,6 +345,8 @@ async function sondarTipos(loja, opts = {}) {
           request_id: id,
           situacao: processando.has(id) ? 'processando' : (prontos.has(id) ? 'pronta_mas_nao_baixou' : ((st.erros || []).some((e) => Number(e.request_id) === id) ? 'erro' : 'sem_resposta')),
           o_que_a_shopee_diz: cruPorId.has(id) ? cruPorId.get(id) : null,
+          // por que o campo acima esta vazio, quando esta: a consulta falhou (ver situacao_crua_indisponivel) ou a Shopee respondeu sem esta tarefa
+          consulta: cruPorId.has(id) ? 'respondeu' : (cruIndisponivel || !cruConsultado ? 'falhou' : 'respondeu_sem_esta_tarefa'),
         })),
         sem_tarefa: reg.ids.length === 0 && !reg.recusa,     // a Shopee não gerou nada: período sem documento desse tipo (ou tipo que a conta não tem)
         notas: lidas.notas.length,
@@ -340,7 +357,7 @@ async function sondarTipos(loja, opts = {}) {
     }
     const pendentes = [];
     for (const reg of porTipo.values()) for (const id of reg.ids) if (processando.has(id)) pendentes.push(reg.tipo + ':' + id);
-    if (pendentes.length) out.continuar = { tarefas_processando: pendentes.length, acrescente_na_url: '&tarefas=' + pendentes.join(','), como: 'espere um minuto e abra a MESMA URL com isto no fim: a sonda nao pede nada de novo a Shopee, so confere e baixa o que ficou pronto' };
+    if (pendentes.length) out.continuar = { tarefas_processando: pendentes.length, acrescente_na_url: '&tarefas=' + pendentes.join(','), como: 'espere um minuto e abra a MESMA URL com isto no fim (se ela ja tiver um &tarefas=, pode deixar: vale o ultimo). A sonda nao pede nada de novo a Shopee, so confere e baixa o que ficou pronto' };
     out.notas_fora_da_lista = omitidas;      // o resumo e a busca contam todas; só a `lista` tem teto (&limite=)
     const b = opts.busca == null ? '' : String(opts.busca).trim();
     if (b) out.busca = { procurei: b.slice(0, 60), como: 'pedido do item (xPed), numero da nota ou numero/chave da NF referenciada', achei: achados.length, notas: achados, atencao: out.completo ? null : 'leitura incompleta: nao achar aqui NAO prova que a nota nao existe' };
